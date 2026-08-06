@@ -3,10 +3,10 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 
 module Database.Schema.User (UserT (..), User, UserId) where
 
+import Data.UUID (UUID)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Functor.Identity (Identity)
 import Data.Text (Text)
@@ -21,7 +21,9 @@ import GHC.Generics (Generic)
 data UserT f = User
   { userId :: Columnar f Text
   , joined :: Columnar f UTCTime
-  , password :: Columnar f Text
+  , authToken :: Columnar f UUID 
+  , publicKey :: Columnar f Text
+  , lastLoginTimestamp :: Columnar f (Maybe UTCTime)
   }
   deriving (Generic)
 

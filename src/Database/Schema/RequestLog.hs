@@ -4,10 +4,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 
 module Database.Schema.RequestLog (RequestLogT (..), RequestLog, mkRequestLog) where
 
@@ -22,6 +20,7 @@ import Database.Beam.Postgres (PgJSON (..))
 import GHC.Generics (Generic)
 import qualified Network.HTTP.Types.Header as Network
 import Network.Socket (SockAddr)
+import Data.Time (UTCTime, getCurrentTime)
 
 data RequestHeader = RequestHeader {name :: String, value :: String}
   deriving (Generic, Show, ToJSON, FromJSON)
@@ -31,28 +30,32 @@ data RequestLogT f = RequestLog
   , clientAddr :: Columnar f String
   , headers :: Columnar f (PgJSON [RequestHeader])
   , path :: Columnar f String
+  , timestamp :: Columnar f UTCTime
   }
   deriving (Generic)
 
 instance ToJSON RequestLog where
-  toJSON (RequestLog logId' clientAddr' (PgJSON headers') path') =
+  toJSON (RequestLog logId' clientAddr' (PgJSON headers') path' timestamp') =
     object
       [ "logId" .= logId'
       , "clientAddr" .= clientAddr'
       , "headers" .= headers'
       , "path" .= path'
+      , "timestamp" .= timestamp'
       ]
 
 mkRequestLog
   :: SockAddr -> Network.RequestHeaders -> ByteString -> IO RequestLog
 mkRequestLog sockAddr headers' path' = do
   logId <- nextRandom
+  now <- getCurrentTime
   pure $
     RequestLog
       { logId
       , clientAddr = show sockAddr
       , headers = PgJSON $ toRequestHeaders headers'
       , path = unpack path'
+      , timestamp = now
       }
  where
   toRequestHeaders =

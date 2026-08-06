@@ -1,9 +1,8 @@
-# the latest LTS snapshot that beam-postgres is a part of is 20.26
 resolver:
-  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/20/26.yaml
+  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/53.yaml
 
 packages:
 - .
 
-extra-deps:
-  - os-string-2.0.2
+#extra-deps:
+#  - os-string-2.0.2

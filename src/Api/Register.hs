@@ -9,17 +9,11 @@
 
 module Api.Register (Register, register) where
 
-import Control.Monad (unless)
+import Data.UUID (UUID)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON)
+import Data.Aeson (ToJSON, FromJSON)
 import Data.Int (Int32)
-import Data.Password.Argon2
-  ( hashPassword
-  , mkPassword
-  , unPasswordHash
-  )
 import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import Database.Beam
   ( aggregate_
@@ -35,13 +29,14 @@ import Database.Beam
   , val_
   , (==.)
   )
+import qualified Data.UUID.V4 as UUID
+import Crypto.Operations (generateKeyPair)
 import Database.Class (HasDb (runDb))
 import Database.Schema (DevDb (users), UserT (..), devDb)
 import GHC.Generics (Generic)
 import Handler (MyServeHandler)
 import Servant
   ( JSON
-  , NoContent (NoContent)
   , Post
   , ReqBody
   , err412
@@ -55,20 +50,21 @@ type Register =
   "v1"
     :> "register"
     :> ReqBody '[JSON] RegisterRequest
-    :> Post '[JSON] NoContent
+    :> Post '[JSON] RegisterResponse 
 
 data RegisterRequest = RegisterRequest
-  {requestedUserId :: Text, password :: Text}
+  {requestedUserId :: Text}
   deriving (Generic, FromJSON)
 
+data RegisterResponse = RegisterResponse
+  { privateKey :: Text
+  , authToken :: UUID
+  }
+  deriving (Generic, ToJSON)
+
 register
-  :: RegisterRequest -> MyServeHandler NoContent
+  :: RegisterRequest -> MyServeHandler RegisterResponse 
 register (RegisterRequest{..}) = do
-  unless (T.length password > 8) $
-    throwError $
-      err412
-        { errBody = "Password must be at least 8 digits in length."
-        }
   userIdMatches <-
     runDb $
       runSelectReturningOne $
@@ -79,10 +75,9 @@ register (RegisterRequest{..}) = do
   case userIdMatches of
     Nothing -> throwError err500
     Just 0 -> do
-      hashedPassword <-
-        fmap unPasswordHash <$> hashPassword $
-          mkPassword password
       joined <- liftIO getCurrentTime
+      token <- liftIO UUID.nextRandom
+      (publicKey, privateKey') <- liftIO generateKeyPair
       runDb $
         runInsert $
           insert (users devDb) $
@@ -90,10 +85,15 @@ register (RegisterRequest{..}) = do
               [ User
                   { userId = requestedUserId
                   , joined
-                  , password = hashedPassword
+                  , authToken = token 
+                  , publicKey = publicKey
+                  , lastLoginTimestamp = Nothing
                   }
               ]
-      pure NoContent
+      pure $ RegisterResponse
+        { privateKey = privateKey'
+        , authToken = token
+        } 
     Just _ ->
       throwError
         err412{errBody = "That user ID is already taken."}

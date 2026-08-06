@@ -1,9 +1,16 @@
+name: myserve
+volumes:
+  db:
+networks:
+  default:
+    name: myserve-network
+
 services:
   devdb:
     container_name: devdb 
     image: postgres:16-alpine
     volumes:
-      - ./db:/docker-entrypoint-initdb.d
+      - db:/var/lib/postgresql/data
     environment:
       POSTGRES_USERNAME: postgres
       POSTGRES_PASSWORD: password

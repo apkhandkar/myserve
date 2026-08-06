@@ -34,8 +34,8 @@ import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (Connection)
 import Database.Schema
-  ( AuthTokenT (createdAt, createdBy, token)
-  , DevDb (authTokens)
+  ( UserT (joined, userId, authToken)
+  , DevDb (users)
   , devDb
   )
 import Network.Wai (requestHeaders)
@@ -99,32 +99,34 @@ instance
    where
     checkAuthToken
       :: Pool Connection -> Integer -> DelayedIO UserId
-    checkAuthToken pool authTokenTimeoutSeconds = withResource pool $ \conn -> do
+    checkAuthToken pool authTokenTimeoutSeconds = do
       authMay <- asks (lookup authHeader . requestHeaders)
       case fmap parseHeader authMay of
         Nothing -> delayedFailFatal err401
         Just (Right gotToken) -> do
           createdByAndAtMay <-
             liftIO $
-              runBeamPostgres conn $
-                runSelectReturningOne $
-                  select $
-                    fmap (\t -> (createdBy t, createdAt t)) $
-                      filter_ (\t -> token t ==. val_ gotToken) $
-                        all_ (authTokens devDb)
+              withResource pool $ \conn ->
+                runBeamPostgres conn $
+                  runSelectReturningOne $
+                    select $
+                      fmap (\t -> (userId t, joined t)) $
+                        filter_ (\u -> authToken u ==. val_ gotToken) $
+                          all_ (users devDb)
           case createdByAndAtMay of
             Nothing -> delayedFailFatal err403
-            Just (createdBy', createdAt') -> do
+            Just (userId', joined') -> do
               now <- liftIO getCurrentTime
               let tokenExpired =
                     now
-                      > fromIntegral authTokenTimeoutSeconds `addUTCTime` createdAt'
+                      > fromIntegral authTokenTimeoutSeconds `addUTCTime` joined'
               when (tokenExpired || tokenCanBeDeleted (Proxy @postAuth)) $
                 liftIO $
-                  runBeamPostgres conn $
-                    runDelete $
-                      delete (authTokens devDb) (\t -> token t ==. val_ gotToken)
+                  withResource pool $ \conn ->
+                    runBeamPostgres conn $
+                      runDelete $
+                        delete (users devDb) (\u -> userId u ==. val_ userId')
               if tokenExpired
                 then delayedFailFatal err403
-                else pure createdBy'
+                else pure userId'
         Just (Left _) -> delayedFailFatal err401

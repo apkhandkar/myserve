@@ -1,0 +1,2 @@
+alter table service_user
+add column last_login_timestamp timestamptz;

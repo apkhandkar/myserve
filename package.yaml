@@ -6,11 +6,15 @@ extra-source-files:
 dependencies:
 - aeson
 - base
+- base58-bytestring
+- base64-bytestring
 - beam-core
 - beam-postgres
+- crypton
 - bytestring
 - envy
 - postgresql-simple
+- postgresql-migration
 - resource-pool
 - servant-server
 - time
