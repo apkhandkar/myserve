@@ -3,6 +3,3 @@ resolver:
 
 packages:
 - .
-
-#extra-deps:
-#  - os-string-2.0.2

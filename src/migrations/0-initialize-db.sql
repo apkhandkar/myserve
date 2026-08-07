@@ -3,6 +3,7 @@ create table if not exists service_user (
   joined timestamptz not null,
   auth_token uuid,
   public_key char(350) not null,
+  last_active_at timestamptz,
   primary key (user_id)
 );
 

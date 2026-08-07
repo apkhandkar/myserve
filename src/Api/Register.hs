@@ -6,6 +6,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 
 module Api.Register (Register, register) where
 
@@ -30,7 +31,8 @@ import Database.Beam
   , (==.)
   )
 import qualified Data.UUID.V4 as UUID
-import Crypto.Operations (generateKeyPair)
+import Crypto.Encoding qualified as Encoding
+import Crypto.Operations (generateRsaKeyPair)
 import Database.Class (HasDb (runDb))
 import Database.Schema (DevDb (users), UserT (..), devDb)
 import GHC.Generics (Generic)
@@ -57,7 +59,7 @@ data RegisterRequest = RegisterRequest
   deriving (Generic, FromJSON)
 
 data RegisterResponse = RegisterResponse
-  { privateKey :: Text
+  { privateKey :: Encoding.PrivateKey
   , authToken :: UUID
   }
   deriving (Generic, ToJSON)
@@ -77,7 +79,7 @@ register (RegisterRequest{..}) = do
     Just 0 -> do
       joined <- liftIO getCurrentTime
       token <- liftIO UUID.nextRandom
-      (publicKey, privateKey') <- liftIO generateKeyPair
+      (publicKey, privateKey') <- liftIO generateRsaKeyPair
       runDb $
         runInsert $
           insert (users devDb) $
@@ -87,7 +89,7 @@ register (RegisterRequest{..}) = do
                   , joined
                   , authToken = token 
                   , publicKey = publicKey
-                  , lastLoginTimestamp = Nothing
+                  , lastActiveAt = Nothing
                   }
               ]
       pure $ RegisterResponse

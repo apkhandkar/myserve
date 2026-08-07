@@ -26,7 +26,7 @@ import Database.PostgreSQL.Simple.Migration qualified as Migration
 data Env = Env
   { serverPort :: Int
   , pgConnectString :: ByteString
-  , authTokenTimeoutSeconds :: Integer
+  , userAccountLife :: Integer
   }
   deriving (Generic, FromEnv)
 
@@ -60,7 +60,7 @@ main = do
       run serverPort $
         Servant.serveWithContext
           (Proxy @Api)
-          (pool :. authTokenTimeoutSeconds :. EmptyContext)
+          (pool :. userAccountLife :. EmptyContext)
           (server pool)
     Migration.MigrationError err -> do
       putStrLn $ "Migration failed: " <> err

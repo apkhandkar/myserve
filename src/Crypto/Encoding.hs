@@ -1,48 +1,63 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Crypto.Encoding
  ( encodePublicKey
  , decodePublicKey
  , encodePrivateKey
  , decodePrivateKey
+ , PublicKey(..)
+ , PrivateKey(..)
  )
 where
 
+import Data.Aeson (ToJSON)
 import Crypto.Number.ModArithmetic (inverse)
 import Data.ByteString (split)
-import Crypto.PubKey.RSA (PublicKey(..), PrivateKey(..))
+import Crypto.PubKey.RSA qualified as RSA
 import Data.ByteString.Base58 (bitcoinAlphabet, encodeBase58I, decodeBase58I)
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import Data.ByteString (ByteString)
+import Database.Beam.Backend (HasSqlValueSyntax)
+import Database.Beam.Postgres.Syntax (PgValueSyntax)
 
-encodePublicKey :: PublicKey -> Text 
-encodePublicKey (PublicKey{..}) = decodeUtf8 $ encodePart public_n
+newtype PublicKey = PublicKey {publicKeyToText :: Text}
+  deriving newtype (Show, HasSqlValueSyntax PgValueSyntax)
 
-decodePublicKey :: Text -> Maybe PublicKey
-decodePublicKey = decodePublicKey' . encodeUtf8
+newtype PrivateKey = PrivateKey {privateKeyToText :: Text}
+  deriving newtype (Show, ToJSON)
 
-decodePublicKey' :: ByteString -> Maybe PublicKey
+encodePublicKey :: RSA.PublicKey -> PublicKey
+encodePublicKey (RSA.PublicKey{..}) = PublicKey $ decodeUtf8 $ encodePart public_n
+
+decodePublicKey :: PublicKey -> Maybe RSA.PublicKey
+decodePublicKey = decodePublicKey' . encodeUtf8 . publicKeyToText
+
+decodePublicKey' :: ByteString -> Maybe RSA.PublicKey
 decodePublicKey' bs =
   case decodePart bs of
     Nothing -> Nothing
-    Just pn -> Just $ PublicKey
+    Just pn -> Just $ RSA.PublicKey
       { public_size = 256
       , public_n = pn
       , public_e = 0x10001
       }
 
-encodePrivateKey :: PrivateKey -> Text
-encodePrivateKey (PrivateKey{..}) =
+encodePrivateKey :: RSA.PrivateKey -> PrivateKey
+encodePrivateKey (RSA.PrivateKey{..}) =
   let pub = encodePublicKey private_pub
       encD = decodeUtf8 $ encodePart private_d
       encP = decodeUtf8 $ encodePart private_p
       encQ = decodeUtf8 $ encodePart private_q
-  in pub <> "-" <> encD <> "-" <> encP <> "-" <> encQ
+  in PrivateKey $ publicKeyToText pub <> "-" <> encD <> "-" <> encP <> "-" <> encQ
 
-decodePrivateKey :: Text -> Maybe PrivateKey
-decodePrivateKey bs = case split 45 (encodeUtf8 bs) of
+decodePrivateKey :: PrivateKey -> Maybe RSA.PrivateKey
+decodePrivateKey bs = case split 45 (encodeUtf8 $ privateKeyToText bs) of
   [encPub, encD, encP, encQ] ->
     let pubMay = decodePublicKey' encPub
         decDMay = decodePart encD
@@ -55,7 +70,7 @@ decodePrivateKey bs = case split 45 (encodeUtf8 bs) of
             qInvMay = inverse decQ decP
         in case qInvMay of
           Nothing -> Nothing
-          Just qInv -> Just $ PrivateKey
+          Just qInv -> Just $ RSA.PrivateKey
             { private_pub = pub
             , private_d = decD
             , private_p = decP

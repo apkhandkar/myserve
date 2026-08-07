@@ -12,6 +12,7 @@ dependencies:
 - beam-postgres
 - crypton
 - bytestring
+- memory
 - envy
 - postgresql-simple
 - postgresql-migration

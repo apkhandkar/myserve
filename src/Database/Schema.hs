@@ -51,6 +51,6 @@ devDb =
                 { userId = "user_id"
                 , authToken = "auth_token"
                 , publicKey = "public_key"
-                , lastLoginTimestamp = "last_login_timestamp"
+                , lastActiveAt  = "last_active_at"
                 }
       }

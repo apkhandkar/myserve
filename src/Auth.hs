@@ -29,12 +29,15 @@ import Database.Beam
   , runSelectReturningOne
   , select
   , val_
+  , update
   , (==.)
+  , (<-.)
+  , runUpdate
   )
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (Connection)
 import Database.Schema
-  ( UserT (joined, userId, authToken)
+  ( UserT (joined, userId, authToken, lastActiveAt)
   , DevDb (users)
   , devDb
   )
@@ -99,7 +102,7 @@ instance
    where
     checkAuthToken
       :: Pool Connection -> Integer -> DelayedIO UserId
-    checkAuthToken pool authTokenTimeoutSeconds = do
+    checkAuthToken pool userAccountLife = do
       authMay <- asks (lookup authHeader . requestHeaders)
       case fmap parseHeader authMay of
         Nothing -> delayedFailFatal err401
@@ -117,16 +120,25 @@ instance
             Nothing -> delayedFailFatal err403
             Just (userId', joined') -> do
               now <- liftIO getCurrentTime
-              let tokenExpired =
+              let accountExpired =
                     now
-                      > fromIntegral authTokenTimeoutSeconds `addUTCTime` joined'
-              when (tokenExpired || tokenCanBeDeleted (Proxy @postAuth)) $
+                      > fromIntegral userAccountLife `addUTCTime` joined'
+              when (accountExpired || tokenCanBeDeleted (Proxy @postAuth)) $
                 liftIO $
                   withResource pool $ \conn ->
                     runBeamPostgres conn $
                       runDelete $
                         delete (users devDb) (\u -> userId u ==. val_ userId')
-              if tokenExpired
+              if accountExpired
                 then delayedFailFatal err403
-                else pure userId'
+                else do
+                  liftIO $
+                    withResource pool $ \conn ->
+                      runBeamPostgres conn $
+                        runUpdate $
+                          update
+                            (users devDb)
+                            (\u -> lastActiveAt u <-. val_ (Just now))
+                            (\u -> userId u ==. val_ userId')
+                  pure userId'
         Just (Left _) -> delayedFailFatal err401
