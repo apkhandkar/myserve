@@ -6,17 +6,15 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Crypto.Signing
- ( generateKeyPair
+ ( generateSigningKeyPair
  , sign
  , verify
- , PublicKey(..)
- , SecretKey(..)
  , generateVerificationToken
  )
 where
 
-import Data.Aeson (ToJSON)
 import Data.ByteString.Base32 qualified as Base32
+import Data.ByteArray (convert)
 import Crypto.Hash (hash)
 import Crypto.Hash.Algorithms (SHA256)
 import Crypto.PubKey.Ed25519 qualified as Ed25519
@@ -24,14 +22,11 @@ import Crypto.Random (MonadRandom)
 import Data.Text (Text)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
-import Data.ByteString.Base64 qualified as Base64
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Data.ByteArray (convert, ByteArrayAccess)
 import Data.Either.Extra (mapLeft)
 import Crypto.Error qualified as CryptoError
 import Data.Text qualified as Text
-import Database.Beam.Backend (HasSqlValueSyntax)
-import Database.Beam.Postgres.Syntax (PgValueSyntax)
+import Crypto.Types qualified as Types
+import Crypto.Encoding qualified as Encoding
 
 data SigningError =
     SecretKeyDecodeError String
@@ -40,18 +35,6 @@ data SigningError =
   | CryptoError String
   | MalformedVerificationToken 
   deriving Show
-
--- | Base64-encoded ED25519 secret key
-newtype SecretKey = SecretKey {secretKeyToText :: Text}
-  deriving newtype (ToJSON, Show)
-
--- | Base64-encoded ED25519 public key
-newtype PublicKey = PublicKey {publicKeyToText :: Text}
-  deriving newtype (HasSqlValueSyntax PgValueSyntax, Show)
-
--- | Base64-encoded ED25519 signature
-newtype Signature = Signature {signatureToText :: Text}
-  deriving newtype Show
 
 data VerificationToken = VerificationToken Text Text Text Text
 
@@ -66,58 +49,52 @@ instance Show VerificationToken where
     <> Text.unpack part3
 
 -- | Generate an ED25519 key pair
-generateKeyPair :: MonadRandom m => m (PublicKey, SecretKey)
-generateKeyPair = do
+generateSigningKeyPair :: MonadRandom m => m (Types.VerificationKey, Types.SigningKey)
+generateSigningKeyPair = do
   secretKey <- Ed25519.generateSecretKey
   let publicKey = Ed25519.toPublic secretKey
   pure
-    ( PublicKey $ convertAndEncode publicKey
-    , SecretKey $ convertAndEncode secretKey
+    ( Types.VerificationKey $ Encoding.convertAndEncode publicKey
+    , Types.SigningKey $ Encoding.convertAndEncode secretKey
     )
 
 -- | Sign a bytestring payload
-sign :: SecretKey -> ByteString -> Either SigningError Signature
-sign encodedSecretKey payload = do
-  secretKeyBytes <- mapLeft SecretKeyDecodeError $ decodeBase64 $ secretKeyToText encodedSecretKey 
-  secretKey <- eitherSigningError $ Ed25519.secretKey secretKeyBytes
-  let publicKey = Ed25519.toPublic secretKey
-      signature = Ed25519.sign secretKey publicKey payload
-  pure $ Signature $ convertAndEncode signature 
+sign :: Types.SigningKey -> ByteString -> Either SigningError Types.Signature
+sign encodedSigningKey payload = do
+  signingKeyBytes <- mapLeft SecretKeyDecodeError $ Encoding.decodeBase64 $ Types.signingKeyToText encodedSigningKey
+  signingKey <- eitherSigningError $ Ed25519.secretKey signingKeyBytes
+  let verificationKey = Ed25519.toPublic signingKey
+      signature = Ed25519.sign signingKey verificationKey payload
+  pure $ Types.Signature $ Encoding.convertAndEncode signature
 
 -- | Verify a signed payload
-verify :: PublicKey -> ByteString -> Signature -> Either SigningError Bool
+verify :: Types.VerificationKey -> ByteString -> Types.Signature -> Either SigningError Bool
 verify encodedPublicKey payload encodedSignature = do
-  publicKeyBytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText encodedPublicKey 
-  publicKey <- eitherSigningError $ Ed25519.publicKey publicKeyBytes
-  signatureBytes <- mapLeft SignatureDecodeError $ decodeBase64 $ signatureToText encodedSignature
+  verificationKeyBytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText encodedPublicKey
+  verificationKey <- eitherSigningError $ Ed25519.publicKey verificationKeyBytes
+  signatureBytes <- mapLeft SignatureDecodeError $ Encoding.decodeBase64 $ Types.signatureToText encodedSignature
   signature <- eitherSigningError $ Ed25519.signature signatureBytes
-  pure $ Ed25519.verify publicKey payload signature
+  pure $ Ed25519.verify verificationKey payload signature
 
--- | Generate a verification token for a pair of public keys
-generateVerificationToken :: PublicKey -> PublicKey -> Either SigningError VerificationToken
+-- | Generate a verification token for a pair of keys
+generateVerificationToken
+  :: Types.VerificationKey
+  -> Types.VerificationKey
+  -> Either SigningError VerificationToken
 generateVerificationToken pubKey1 pubKey2 = do
-  pubKey1Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey1
-  pubKey2Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey2
-  let concatenatedPubKeys =
-        if pubKey1Bytes > pubKey2Bytes
-          then pubKey1Bytes <> pubKey2Bytes
-          else pubKey2Bytes <> pubKey1Bytes
-      hashed = hash @_ @SHA256 concatenatedPubKeys
+  verKey1Bytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText pubKey1
+  verKey2Bytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText pubKey2
+  let concatenatedVerKeys =
+        if verKey1Bytes > verKey2Bytes
+          then verKey1Bytes <> verKey2Bytes
+          else verKey2Bytes <> verKey1Bytes
+      hashed = hash @_ @SHA256 concatenatedVerKeys
       encoded = Base32.encodeBase32 $ ByteString.take 10 $ convert hashed
   case Text.chunksOf 4 encoded of
     [part0, part1, part2, part3] ->
       pure $ VerificationToken part0 part1 part2 part3
     -- Should never happen
     _ -> Left MalformedVerificationToken
-
-encodeBase64 :: ByteString -> Text
-encodeBase64 = decodeUtf8 . Base64.encode
-
-decodeBase64 :: Text -> Either String ByteString
-decodeBase64 = Base64.decode . encodeUtf8
-
-convertAndEncode :: ByteArrayAccess ba => ba -> Text
-convertAndEncode = encodeBase64 . convert
 
 eitherSigningError :: CryptoError.CryptoFailable a -> Either SigningError a
 eitherSigningError = mapLeft (CryptoError . show) . CryptoError.eitherCryptoError

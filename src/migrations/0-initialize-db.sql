@@ -2,7 +2,7 @@ create table if not exists service_user (
   user_id varchar(50),
   joined timestamptz not null,
   auth_token uuid,
-  decryption_key char(350) not null,
+  encryption_key char(350) not null,
   verification_key char(44) not null,
   last_active_at timestamptz,
   primary key (user_id)

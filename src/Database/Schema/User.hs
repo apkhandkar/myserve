@@ -17,15 +17,14 @@ import Database.Beam
   , Table (PrimaryKey, primaryKey)
   )
 import GHC.Generics (Generic)
-import Crypto.Encoding (PublicKey)
-import Crypto.Signing qualified as Signing
+import Crypto qualified
 
 data UserT f = User
   { userId :: Columnar f Text
   , joined :: Columnar f UTCTime
-  , authToken :: Columnar f UUID 
-  , decryptionKey :: Columnar f PublicKey
-  , verificationKey :: Columnar f Signing.PublicKey
+  , authToken :: Columnar f UUID
+  , encryptionKey :: Columnar f Crypto.EncryptionKey
+  , verificationKey :: Columnar f Crypto.VerificationKey
   , lastActiveAt :: Columnar f (Maybe UTCTime)
   }
   deriving (Generic)

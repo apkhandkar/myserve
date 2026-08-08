@@ -50,7 +50,7 @@ devDb =
               tableModification
                 { userId = "user_id"
                 , authToken = "auth_token"
-                , decryptionKey = "decryption_key"
+                , encryptionKey = "encryption_key"
                 , verificationKey = "verification_key"
                 , lastActiveAt  = "last_active_at"
                 }

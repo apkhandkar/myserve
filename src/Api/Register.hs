@@ -10,7 +10,6 @@
 
 module Api.Register (Register, register) where
 
-import Crypto.Signing qualified as Signing
 import Data.UUID (UUID)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (ToJSON, FromJSON)
@@ -32,8 +31,7 @@ import Database.Beam
   , (==.)
   )
 import qualified Data.UUID.V4 as UUID
-import Crypto.Encoding qualified as Encoding
-import Crypto.Operations (generateRsaKeyPair)
+import Crypto qualified
 import Database.Class (HasDb (runDb))
 import Database.Schema (DevDb (users), UserT (..), devDb)
 import GHC.Generics (Generic)
@@ -60,8 +58,8 @@ data RegisterRequest = RegisterRequest
   deriving (Generic, FromJSON)
 
 data RegisterResponse = RegisterResponse
-  { encryptionKey :: Encoding.PrivateKey
-  , signingKey :: Signing.SecretKey
+  { decryptionKey :: Crypto.DecryptionKey
+  , signingKey :: Crypto.SigningKey
   , authToken :: UUID
   }
   deriving (Generic, ToJSON)
@@ -81,8 +79,8 @@ register (RegisterRequest{..}) = do
     Just 0 -> do
       joined <- liftIO getCurrentTime
       token <- liftIO UUID.nextRandom
-      (decryptionKey', encryptionKey') <- liftIO generateRsaKeyPair
-      (verificationKey', signingKey') <- liftIO Signing.generateKeyPair
+      (encryptionKey', decryptionKey') <- liftIO Crypto.generateEncryptionKeyPair
+      (verificationKey', signingKey') <- liftIO Crypto.generateSigningKeyPair
       runDb $
         runInsert $
           insert (users devDb) $
@@ -91,13 +89,13 @@ register (RegisterRequest{..}) = do
                   { userId = requestedUserId
                   , joined
                   , authToken = token 
-                  , decryptionKey = decryptionKey'
+                  , encryptionKey = encryptionKey'
                   , verificationKey = verificationKey'
                   , lastActiveAt = Nothing
                   }
               ]
       pure $ RegisterResponse
-        { encryptionKey = encryptionKey'
+        { decryptionKey = decryptionKey'
         , signingKey = signingKey'
         , authToken = token
         } 
