@@ -14,6 +14,7 @@ dependencies:
 - bytestring
 - memory
 - envy
+- extra
 - postgresql-simple
 - postgresql-migration
 - resource-pool
