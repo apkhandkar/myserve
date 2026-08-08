@@ -1,29 +1,40 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Crypto.Ed25519
  ( generateKeyPair
  , sign
  , verify
+ , PublicKey(..)
+ , generateVerificationToken
  )
 where
 
+import Data.ByteString.Base32 qualified as Base32
+import Crypto.Hash (hash)
+import Crypto.Hash.Algorithms (SHA256)
 import Crypto.PubKey.Ed25519 qualified as Ed25519
 import Crypto.Random (MonadRandom)
 import Data.Text (Text)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64 qualified as Base64
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.ByteArray (convert, ByteArrayAccess)
 import Data.Either.Extra (mapLeft)
 import Crypto.Error qualified as CryptoError
+import Data.Text qualified as Text
 
 data Ed25519Error =
     SecretKeyDecodeError String
   | PublicKeyDecodeError String
+  | SignatureDecodeError String
   | CryptoError String
-  | Nil
+  | MalformedVerificationToken 
   deriving Show
 
 -- | Base64-encoded ED25519 secret key
@@ -34,6 +45,22 @@ newtype SecretKey = SecretKey {secretKeyToText :: Text}
 newtype PublicKey = PublicKey {publicKeyToText :: Text}
   deriving newtype Show
 
+-- | Base64-encoded ED25519 signature
+newtype Signature = Signature {signatureToText :: Text}
+  deriving newtype Show
+
+data VerificationToken = VerificationToken Text Text Text Text
+
+instance Show VerificationToken where
+  show (VerificationToken part0 part1 part2 part3) =
+    Text.unpack part0
+    <> "-"
+    <> Text.unpack part1
+    <> "-"
+    <> Text.unpack part2
+    <> "-"
+    <> Text.unpack part3
+
 -- | Generate an ED25519 key pair
 generateKeyPair :: MonadRandom m => m (PublicKey, SecretKey)
 generateKeyPair = do
@@ -43,27 +70,50 @@ generateKeyPair = do
     ( PublicKey $ convertAndEncode publicKey
     , SecretKey $ convertAndEncode secretKey
     )
- where
-  convertAndEncode :: ByteArrayAccess ba => ba -> Text
-  convertAndEncode = encodeBase64 . convert
 
 -- | Sign a bytestring payload
-sign :: SecretKey -> ByteString -> Either Ed25519Error Ed25519.Signature
+sign :: SecretKey -> ByteString -> Either Ed25519Error Signature
 sign encodedSecretKey payload = do
   secretKeyBytes <- mapLeft SecretKeyDecodeError $ decodeBase64 $ secretKeyToText encodedSecretKey 
-  secretKey <- mapLeft (CryptoError . show) $ CryptoError.eitherCryptoError $ Ed25519.secretKey secretKeyBytes
+  secretKey <- eitherEd25519Error $ Ed25519.secretKey secretKeyBytes
   let publicKey = Ed25519.toPublic secretKey
-  pure $ Ed25519.sign secretKey publicKey payload
+      signature = Ed25519.sign secretKey publicKey payload
+  pure $ Signature $ convertAndEncode signature 
 
 -- | Verify a signed payload
-verify :: PublicKey -> ByteString -> Ed25519.Signature -> Either Ed25519Error Bool
-verify encodedPublicKey payload signature = do
+verify :: PublicKey -> ByteString -> Signature -> Either Ed25519Error Bool
+verify encodedPublicKey payload encodedSignature = do
   publicKeyBytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText encodedPublicKey 
-  publicKey <- mapLeft (CryptoError . show) $ CryptoError.eitherCryptoError $ Ed25519.publicKey publicKeyBytes
+  publicKey <- eitherEd25519Error $ Ed25519.publicKey publicKeyBytes
+  signatureBytes <- mapLeft SignatureDecodeError $ decodeBase64 $ signatureToText encodedSignature
+  signature <- eitherEd25519Error $ Ed25519.signature signatureBytes
   pure $ Ed25519.verify publicKey payload signature
+
+-- | Generate a verification token for a pair of public keys
+generateVerificationToken :: PublicKey -> PublicKey -> Either Ed25519Error VerificationToken
+generateVerificationToken pubKey1 pubKey2 = do
+  pubKey1Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey1
+  pubKey2Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey2
+  let concatenatedPubKeys =
+        if pubKey1Bytes > pubKey2Bytes
+          then pubKey1Bytes <> pubKey2Bytes
+          else pubKey2Bytes <> pubKey1Bytes
+      hashed = hash @_ @SHA256 concatenatedPubKeys
+      encoded = Base32.encodeBase32 $ ByteString.take 10 $ convert hashed
+  case Text.chunksOf 4 encoded of
+    [part0, part1, part2, part3] ->
+      pure $ VerificationToken part0 part1 part2 part3
+    -- Should never happen
+    _ -> Left MalformedVerificationToken
 
 encodeBase64 :: ByteString -> Text
 encodeBase64 = decodeUtf8 . Base64.encode
 
 decodeBase64 :: Text -> Either String ByteString
 decodeBase64 = Base64.decode . encodeUtf8
+
+convertAndEncode :: ByteArrayAccess ba => ba -> Text
+convertAndEncode = encodeBase64 . convert
+
+eitherEd25519Error :: CryptoError.CryptoFailable a -> Either Ed25519Error a
+eitherEd25519Error = mapLeft (CryptoError . show) . CryptoError.eitherCryptoError

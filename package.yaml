@@ -8,6 +8,7 @@ dependencies:
 - base
 - base58-bytestring
 - base64-bytestring
+- base32
 - beam-core
 - beam-postgres
 - crypton
