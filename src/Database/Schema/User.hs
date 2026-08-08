@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 
 module Database.Schema.User (UserT (..), User, UserId) where
 
@@ -17,12 +18,14 @@ import Database.Beam
   )
 import GHC.Generics (Generic)
 import Crypto.Encoding (PublicKey)
+import Crypto.Signing qualified as Signing
 
 data UserT f = User
   { userId :: Columnar f Text
   , joined :: Columnar f UTCTime
   , authToken :: Columnar f UUID 
-  , publicKey :: Columnar f PublicKey
+  , decryptionKey :: Columnar f PublicKey
+  , verificationKey :: Columnar f Signing.PublicKey
   , lastActiveAt :: Columnar f (Maybe UTCTime)
   }
   deriving (Generic)

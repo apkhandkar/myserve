@@ -5,15 +5,17 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Crypto.Ed25519
+module Crypto.Signing
  ( generateKeyPair
  , sign
  , verify
  , PublicKey(..)
+ , SecretKey(..)
  , generateVerificationToken
  )
 where
 
+import Data.Aeson (ToJSON)
 import Data.ByteString.Base32 qualified as Base32
 import Crypto.Hash (hash)
 import Crypto.Hash.Algorithms (SHA256)
@@ -28,8 +30,10 @@ import Data.ByteArray (convert, ByteArrayAccess)
 import Data.Either.Extra (mapLeft)
 import Crypto.Error qualified as CryptoError
 import Data.Text qualified as Text
+import Database.Beam.Backend (HasSqlValueSyntax)
+import Database.Beam.Postgres.Syntax (PgValueSyntax)
 
-data Ed25519Error =
+data SigningError =
     SecretKeyDecodeError String
   | PublicKeyDecodeError String
   | SignatureDecodeError String
@@ -39,11 +43,11 @@ data Ed25519Error =
 
 -- | Base64-encoded ED25519 secret key
 newtype SecretKey = SecretKey {secretKeyToText :: Text}
-  deriving newtype Show
+  deriving newtype (ToJSON, Show)
 
 -- | Base64-encoded ED25519 public key
 newtype PublicKey = PublicKey {publicKeyToText :: Text}
-  deriving newtype Show
+  deriving newtype (HasSqlValueSyntax PgValueSyntax, Show)
 
 -- | Base64-encoded ED25519 signature
 newtype Signature = Signature {signatureToText :: Text}
@@ -72,25 +76,25 @@ generateKeyPair = do
     )
 
 -- | Sign a bytestring payload
-sign :: SecretKey -> ByteString -> Either Ed25519Error Signature
+sign :: SecretKey -> ByteString -> Either SigningError Signature
 sign encodedSecretKey payload = do
   secretKeyBytes <- mapLeft SecretKeyDecodeError $ decodeBase64 $ secretKeyToText encodedSecretKey 
-  secretKey <- eitherEd25519Error $ Ed25519.secretKey secretKeyBytes
+  secretKey <- eitherSigningError $ Ed25519.secretKey secretKeyBytes
   let publicKey = Ed25519.toPublic secretKey
       signature = Ed25519.sign secretKey publicKey payload
   pure $ Signature $ convertAndEncode signature 
 
 -- | Verify a signed payload
-verify :: PublicKey -> ByteString -> Signature -> Either Ed25519Error Bool
+verify :: PublicKey -> ByteString -> Signature -> Either SigningError Bool
 verify encodedPublicKey payload encodedSignature = do
   publicKeyBytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText encodedPublicKey 
-  publicKey <- eitherEd25519Error $ Ed25519.publicKey publicKeyBytes
+  publicKey <- eitherSigningError $ Ed25519.publicKey publicKeyBytes
   signatureBytes <- mapLeft SignatureDecodeError $ decodeBase64 $ signatureToText encodedSignature
-  signature <- eitherEd25519Error $ Ed25519.signature signatureBytes
+  signature <- eitherSigningError $ Ed25519.signature signatureBytes
   pure $ Ed25519.verify publicKey payload signature
 
 -- | Generate a verification token for a pair of public keys
-generateVerificationToken :: PublicKey -> PublicKey -> Either Ed25519Error VerificationToken
+generateVerificationToken :: PublicKey -> PublicKey -> Either SigningError VerificationToken
 generateVerificationToken pubKey1 pubKey2 = do
   pubKey1Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey1
   pubKey2Bytes <- mapLeft PublicKeyDecodeError $ decodeBase64 $ publicKeyToText pubKey2
@@ -115,5 +119,5 @@ decodeBase64 = Base64.decode . encodeUtf8
 convertAndEncode :: ByteArrayAccess ba => ba -> Text
 convertAndEncode = encodeBase64 . convert
 
-eitherEd25519Error :: CryptoError.CryptoFailable a -> Either Ed25519Error a
-eitherEd25519Error = mapLeft (CryptoError . show) . CryptoError.eitherCryptoError
+eitherSigningError :: CryptoError.CryptoFailable a -> Either SigningError a
+eitherSigningError = mapLeft (CryptoError . show) . CryptoError.eitherCryptoError

@@ -10,6 +10,7 @@
 
 module Api.Register (Register, register) where
 
+import Crypto.Signing qualified as Signing
 import Data.UUID (UUID)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (ToJSON, FromJSON)
@@ -59,7 +60,8 @@ data RegisterRequest = RegisterRequest
   deriving (Generic, FromJSON)
 
 data RegisterResponse = RegisterResponse
-  { privateKey :: Encoding.PrivateKey
+  { encryptionKey :: Encoding.PrivateKey
+  , signingKey :: Signing.SecretKey
   , authToken :: UUID
   }
   deriving (Generic, ToJSON)
@@ -79,7 +81,8 @@ register (RegisterRequest{..}) = do
     Just 0 -> do
       joined <- liftIO getCurrentTime
       token <- liftIO UUID.nextRandom
-      (publicKey, privateKey') <- liftIO generateRsaKeyPair
+      (decryptionKey', encryptionKey') <- liftIO generateRsaKeyPair
+      (verificationKey', signingKey') <- liftIO Signing.generateKeyPair
       runDb $
         runInsert $
           insert (users devDb) $
@@ -88,12 +91,14 @@ register (RegisterRequest{..}) = do
                   { userId = requestedUserId
                   , joined
                   , authToken = token 
-                  , publicKey = publicKey
+                  , decryptionKey = decryptionKey'
+                  , verificationKey = verificationKey'
                   , lastActiveAt = Nothing
                   }
               ]
       pure $ RegisterResponse
-        { privateKey = privateKey'
+        { encryptionKey = encryptionKey'
+        , signingKey = signingKey'
         , authToken = token
         } 
     Just _ ->
