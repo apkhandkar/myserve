@@ -14,6 +14,7 @@ create table if not exists user_messages (
   to_user user_id varchar(50),
   message_timestamp timestamptz not null,
   message_payload text not null,
+  message_signature char(88) not null,
   encrypted_symmetric_key char(344) not null,
   authentication_tag char(24) not null,
   nonce char(16) not null,

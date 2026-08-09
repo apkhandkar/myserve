@@ -64,6 +64,7 @@ devDb =
                   , fromUser = "from_user"
                   , toUser = "to_user"
                   , messageTimestamp = "message_timestamp"
+                  , messageSignature = "message_signature"
                   , payload = "message_payload"
                   , encryptedSymmetricKey = "encrypted_symmetric_key"
                   , authenticationTag = "authentication_tag"

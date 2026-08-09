@@ -24,6 +24,7 @@ data MessageT f = Message
   , fromUser :: Columnar f Text
   , toUser :: Columnar f Text
   , messageTimestamp :: Columnar f UTCTime
+  , messageSignature :: Columnar f Crypto.Signature
   , payload :: Columnar f Crypto.EncryptedMessage
   , encryptedSymmetricKey :: Columnar f Crypto.EncryptedSymmetricKey
   , authenticationTag :: Columnar f Crypto.AuthTag
