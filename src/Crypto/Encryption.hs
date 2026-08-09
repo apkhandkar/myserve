@@ -48,6 +48,7 @@ data SymmetricKeyError =
   | NonceInitializationFailure
   | AuthTagDecodeFailure String
   | MessageEncodingError
+  | DecryptionFailure
   deriving Show
 
 -- | Generate a symmetric (AES-256) key
@@ -89,7 +90,7 @@ decryptMessage
   -> Types.Nonce
   -> Types.AuthTag
   -> Types.EncryptedMessage
-  -> Either SymmetricKeyError (Maybe Types.PlaintextMessage)
+  -> Either SymmetricKeyError Types.PlaintextMessage
 decryptMessage aesKey encodedNonce encodedAuthTag encryptedMessage = do
   cipher <- initCipher aesKey
   nonce <- decodeNonce encodedNonce
@@ -99,9 +100,12 @@ decryptMessage aesKey encodedNonce encodedAuthTag encryptedMessage = do
   authTag <- case (Encoding.decodeBase64 $ Types.authTagToText encodedAuthTag) of
     Left err -> Left $ AuthTagDecodeFailure err
     Right tag -> pure $ AESGCM.AuthTag $ convert tag
-  pure
-    $ fmap (Types.PlaintextMessage . decodeUtf8)
-    $ AESGCM.decrypt cipher nonce ByteString.empty encryptedMessageRawBytes authTag
+  decrypted <-
+    maybe
+      (Left DecryptionFailure)
+      pure
+      (AESGCM.decrypt cipher nonce ByteString.empty encryptedMessageRawBytes authTag)
+  pure $ Types.PlaintextMessage $ decodeUtf8 decrypted
 
 initCipher :: Types.SymmetricKey -> Either SymmetricKeyError AES256
 initCipher encodedKey = case Encoding.decodeBase64 $ Types.symmetricKeyToText encodedKey of

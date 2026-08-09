@@ -20,7 +20,6 @@ import Crypto.Hash.Algorithms (SHA256)
 import Crypto.PubKey.Ed25519 qualified as Ed25519
 import Crypto.Random (MonadRandom)
 import Data.Text (Text)
-import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.Either.Extra (mapLeft)
 import Crypto.Error qualified as CryptoError
@@ -32,6 +31,7 @@ data SigningError =
     SecretKeyDecodeError String
   | PublicKeyDecodeError String
   | SignatureDecodeError String
+  | MessageDecodeError String
   | CryptoError String
   | MalformedVerificationToken 
   deriving Show
@@ -58,20 +58,22 @@ generateSigningKeyPair = do
     , Types.SigningKey $ Encoding.convertAndEncode secretKey
     )
 
--- | Sign a bytestring payload
-sign :: Types.SigningKey -> ByteString -> Either SigningError Types.Signature
-sign encodedSigningKey payload = do
+-- | Sign an encrypted message
+sign :: Types.SigningKey -> Types.EncryptedMessage -> Either SigningError Types.Signature
+sign encodedSigningKey encodedPayload = do
   signingKeyBytes <- mapLeft SecretKeyDecodeError $ Encoding.decodeBase64 $ Types.signingKeyToText encodedSigningKey
   signingKey <- eitherSigningError $ Ed25519.secretKey signingKeyBytes
+  payload <- mapLeft MessageDecodeError $ Encoding.decodeBase64 $ Types.encryptedMessageToText encodedPayload
   let verificationKey = Ed25519.toPublic signingKey
       signature = Ed25519.sign signingKey verificationKey payload
   pure $ Types.Signature $ Encoding.convertAndEncode signature
 
 -- | Verify a signed payload
-verify :: Types.VerificationKey -> ByteString -> Types.Signature -> Either SigningError Bool
-verify encodedPublicKey payload encodedSignature = do
+verify :: Types.VerificationKey -> Types.EncryptedMessage -> Types.Signature -> Either SigningError Bool
+verify encodedPublicKey encodedPayload encodedSignature = do
   verificationKeyBytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText encodedPublicKey
   verificationKey <- eitherSigningError $ Ed25519.publicKey verificationKeyBytes
+  payload <- mapLeft MessageDecodeError $ Encoding.decodeBase64 $ Types.encryptedMessageToText encodedPayload
   signatureBytes <- mapLeft SignatureDecodeError $ Encoding.decodeBase64 $ Types.signatureToText encodedSignature
   signature <- eitherSigningError $ Ed25519.signature signatureBytes
   pure $ Ed25519.verify verificationKey payload signature

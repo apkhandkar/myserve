@@ -18,7 +18,7 @@ module Crypto.Types
 where
 
 import Data.Text (Text)
-import Data.Aeson (ToJSON)
+import Data.Aeson (ToJSON, FromJSON)
 import Database.Beam.Backend (HasSqlValueSyntax)
 import Database.Beam.Postgres.Syntax (PgValueSyntax)
 
@@ -48,22 +48,22 @@ newtype SymmetricKey = SymmetricKey {symmetricKeyToText :: Text}
 
 -- | RSA-encrypted AES key, safe to be transmitted over the network
 newtype EncryptedSymmetricKey = EncryptedSymmetricKey {encryptedSymmetricKeyToText :: Text}
-  deriving newtype Show
+  deriving newtype (Show, FromJSON)
 
 -- | Nonce used for symmetric key encryption/decryption
 newtype Nonce = Nonce {nonceToText :: Text}
-  deriving newtype Show
+  deriving newtype (Show, FromJSON)
 
 -- | Authentication tag used for symmteric key decryption
 newtype AuthTag = AuthTag {authTagToText :: Text}
-  deriving newtype Show
+  deriving newtype (Show, FromJSON)
 
 -- | An unencrypted, plaintext message
 newtype PlaintextMessage = PlaintextMessage {plaintextMessageToText :: Text}
-  deriving newtype Show
+  deriving newtype (Eq, Show)
 
 -- | Encrypted message
 newtype EncryptedMessage = EncryptedMessage {encryptedMessageToText :: Text}
-  deriving newtype Show
+  deriving newtype (Show, FromJSON)
 
 

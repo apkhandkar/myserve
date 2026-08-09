@@ -24,11 +24,13 @@ import Database.Schema.RequestLog as X
   , RequestLogT (..)
   )
 import Database.Schema.User as X (User, UserId, UserT (..))
+import Database.Schema.Message as X (Message, MessageId, MessageT (..))
 import GHC.Generics (Generic)
 
 data DevDb f = DevDb
   { requestLogs :: f (TableEntity RequestLogT)
   , users :: f (TableEntity UserT)
+  , messages :: f (TableEntity MessageT)
   }
   deriving (Generic, Database be)
 
@@ -54,4 +56,16 @@ devDb =
                 , verificationKey = "verification_key"
                 , lastActiveAt  = "last_active_at"
                 }
+      , messages =
+          setEntityName "user_messages"
+            <> modifyTableFields
+                tableModification
+                  { messageId = "message_id"
+                  , fromUser = "from_user"
+                  , toUser = "to_user"
+                  , messageTimestamp = "message_timestamp"
+                  , payload = "message_payload"
+                  , encryptedSymmetricKey = "encrypted_symmetric_key"
+                  , authenticationTag = "authentication_tag"
+                  }
       }
