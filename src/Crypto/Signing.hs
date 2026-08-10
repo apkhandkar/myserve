@@ -13,6 +13,7 @@ module Crypto.Signing
  )
 where
 
+import Data.ByteString (ByteString)
 import Data.ByteString.Base32 qualified as Base32
 import Data.ByteArray (convert)
 import Crypto.Hash (hash)
@@ -22,16 +23,12 @@ import Crypto.Random (MonadRandom)
 import Data.Text (Text)
 import Data.ByteString qualified as ByteString
 import Data.Either.Extra (mapLeft)
-import Crypto.Error qualified as CryptoError
 import Data.Text qualified as Text
 import Crypto.Types qualified as Types
 import Crypto.Encoding qualified as Encoding
 
 data SigningError =
-    SecretKeyDecodeError String
-  | PublicKeyDecodeError String
-  | SignatureDecodeError String
-  | MessageDecodeError String
+    MessageDecodeError String
   | CryptoError String
   | MalformedVerificationToken 
   deriving Show
@@ -54,38 +51,33 @@ generateSigningKeyPair = do
   secretKey <- Ed25519.generateSecretKey
   let publicKey = Ed25519.toPublic secretKey
   pure
-    ( Types.VerificationKey $ Encoding.convertAndEncode publicKey
-    , Types.SigningKey $ Encoding.convertAndEncode secretKey
+    ( Types.VerificationKey publicKey
+    , Types.SigningKey secretKey
     )
 
 -- | Sign an encrypted message
 sign :: Types.SigningKey -> Types.EncryptedMessage -> Either SigningError Types.Signature
-sign encodedSigningKey encodedPayload = do
-  signingKeyBytes <- mapLeft SecretKeyDecodeError $ Encoding.decodeBase64 $ Types.signingKeyToText encodedSigningKey
-  signingKey <- eitherSigningError $ Ed25519.secretKey signingKeyBytes
+sign signingKey encodedPayload = do
   payload <- mapLeft MessageDecodeError $ Encoding.decodeBase64 $ Types.encryptedMessageToText encodedPayload
-  let verificationKey = Ed25519.toPublic signingKey
-      signature = Ed25519.sign signingKey verificationKey payload
-  pure $ Types.Signature $ Encoding.convertAndEncode signature
+  let verificationKey = Ed25519.toPublic (Types.getSigningKey signingKey)
+      signature = Ed25519.sign (Types.getSigningKey signingKey) verificationKey payload
+  pure $ Types.Signature signature
 
 -- | Verify a signed payload
 verify :: Types.VerificationKey -> Types.EncryptedMessage -> Types.Signature -> Either SigningError Bool
-verify encodedPublicKey encodedPayload encodedSignature = do
-  verificationKeyBytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText encodedPublicKey
-  verificationKey <- eitherSigningError $ Ed25519.publicKey verificationKeyBytes
+verify verificationKey encodedPayload signature = do
   payload <- mapLeft MessageDecodeError $ Encoding.decodeBase64 $ Types.encryptedMessageToText encodedPayload
-  signatureBytes <- mapLeft SignatureDecodeError $ Encoding.decodeBase64 $ Types.signatureToText encodedSignature
-  signature <- eitherSigningError $ Ed25519.signature signatureBytes
-  pure $ Ed25519.verify verificationKey payload signature
+  pure $ Ed25519.verify (Types.getVerificationKey verificationKey) payload (Types.getSignature signature)
 
 -- | Generate a verification token for a pair of keys
 generateVerificationToken
   :: Types.VerificationKey
   -> Types.VerificationKey
   -> Either SigningError VerificationToken
-generateVerificationToken pubKey1 pubKey2 = do
-  verKey1Bytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText pubKey1
-  verKey2Bytes <- mapLeft PublicKeyDecodeError $ Encoding.decodeBase64 $ Types.verificationKeyToText pubKey2
+generateVerificationToken verKey1 verKey2 = do
+  let toByteString = convert @_ @ByteString . Types.getVerificationKey
+      verKey1Bytes = toByteString verKey1
+      verKey2Bytes = toByteString verKey2
   let concatenatedVerKeys =
         if verKey1Bytes > verKey2Bytes
           then verKey1Bytes <> verKey2Bytes
@@ -97,6 +89,3 @@ generateVerificationToken pubKey1 pubKey2 = do
       pure $ VerificationToken part0 part1 part2 part3
     -- Should never happen
     _ -> Left MalformedVerificationToken
-
-eitherSigningError :: CryptoError.CryptoFailable a -> Either SigningError a
-eitherSigningError = mapLeft (CryptoError . show) . CryptoError.eitherCryptoError
