@@ -119,6 +119,9 @@ instance FromField EncryptionKey where
 
 instance FromBackendRow Postgres EncryptionKey
 
+instance ToJSON EncryptionKey where
+  toJSON = toJSON . encodePublicKey . getEncryptionKey
+
 -- | Encode an RSA public key to its base58 representation
 encodePublicKey :: RSA.PublicKey -> Text
 encodePublicKey (RSA.PublicKey{..}) =
