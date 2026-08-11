@@ -198,6 +198,15 @@ newtype EncryptedSymmetricKey = EncryptedSymmetricKey {getEncryptedSymmetricKey 
 instance Show EncryptedSymmetricKey where
   show = Text.unpack . encodeBase64 . getEncryptedSymmetricKey
 
+instance FromField EncryptedSymmetricKey where
+  fromField field metadata = do
+    encodedKey <- fromField field metadata
+    case decodeBase64 encodedKey of
+      Left err -> returnError ConversionFailed field err
+      Right key -> pure $ EncryptedSymmetricKey key
+
+instance FromBackendRow Postgres EncryptedSymmetricKey
+
 instance FromJSON EncryptedSymmetricKey where
   parseJSON = withText "Encrypted AES-256 key" $ \encodedKey ->
     case decodeBase64 encodedKey of
@@ -212,6 +221,17 @@ newtype Nonce = Nonce {getNonce :: AESGCM.Nonce}
 
 instance Show Nonce where
   show = Text.unpack . convertAndEncode . getNonce
+
+instance FromField Nonce where
+  fromField field metadata = do
+    encodedNonce <- fromField field metadata
+    case decodeBase64 encodedNonce of
+      Left err -> returnError ConversionFailed field err
+      Right nonceBytes -> case AESGCM.nonce nonceBytes of
+        CryptoFailed err' -> returnError ConversionFailed field $ show err'
+        CryptoPassed nonce -> pure $ Nonce nonce
+
+instance FromBackendRow Postgres Nonce
 
 instance FromJSON Nonce where
   parseJSON = withText "AES-GCM nonce" $ \encodedNonce -> do
@@ -230,6 +250,15 @@ newtype AuthTag = AuthTag {getAuthTag :: Cipher.AuthTag}
 instance Show AuthTag where
   show = Text.unpack . convertAndEncode . getAuthTag
 
+instance FromField AuthTag where
+  fromField field metadata = do
+    encodedAuthTag <- fromField field metadata
+    case decodeBase64 encodedAuthTag of
+      Left err -> returnError ConversionFailed field err
+      Right authTag -> pure $ AuthTag $ Cipher.AuthTag $ convert authTag
+
+instance FromBackendRow Postgres AuthTag
+
 instance FromJSON AuthTag where
   parseJSON = withText "Authentication tag" $ \encodedAuthTag ->
     case decodeBase64 encodedAuthTag of
@@ -245,6 +274,6 @@ newtype PlaintextMessage = PlaintextMessage {plaintextMessageToText :: Text}
 
 -- | Encrypted message
 newtype EncryptedMessage = EncryptedMessage {encryptedMessageToText :: Text}
-  deriving newtype (Show, FromJSON, HasSqlValueSyntax PgValueSyntax)
+  deriving newtype (Show, FromJSON, HasSqlValueSyntax PgValueSyntax, FromField, FromBackendRow Postgres)
 
 
