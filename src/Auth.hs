@@ -10,13 +10,13 @@
 
 module Auth (WithTokenAuth, UserId, PostAuth (..)) where
 
+import UserId (UserId)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Data.Pool (Pool, withResource)
 import Data.Proxy (Proxy (Proxy))
 import Data.String (IsString)
-import Data.Text (Text)
 import Data.Time
   ( addUTCTime
   , getCurrentTime
@@ -73,8 +73,6 @@ instance KnownTokenDeleteStatus KeepToken where
 
 -- | Check auth token before handler execution.
 data WithTokenAuth (postAuth :: PostAuth)
-
-type UserId = Text
 
 authHeader :: IsString a => a
 authHeader = "Authorization"

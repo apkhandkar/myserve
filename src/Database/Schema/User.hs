@@ -5,11 +5,11 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 
-module Database.Schema.User (UserT (..), User, UserId) where
+module Database.Schema.User (UserT (..), User) where
 
+import UserId (UserId)
 import Data.UUID (UUID)
 import Data.Functor.Identity (Identity)
-import Data.Text (Text)
 import Data.Time (UTCTime)
 import Database.Beam
   ( Beamable
@@ -20,7 +20,7 @@ import GHC.Generics (Generic)
 import Crypto qualified
 
 data UserT f = User
-  { userId :: Columnar f Text
+  { userId :: Columnar f UserId
   , joined :: Columnar f UTCTime
   , authToken :: Columnar f UUID
   , encryptionKey :: Columnar f Crypto.EncryptionKey
@@ -36,10 +36,6 @@ instance Beamable UserT
 deriving instance Show User
 
 instance Table UserT where
-  data PrimaryKey UserT f = UserId (Columnar f Text)
+  data PrimaryKey UserT f = UserPKey (Columnar f UserId)
     deriving (Generic, Beamable)
-  primaryKey = UserId . userId
-
-type UserId = PrimaryKey UserT Identity
-
-deriving instance Show UserId
+  primaryKey = UserPKey . userId

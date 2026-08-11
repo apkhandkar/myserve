@@ -9,7 +9,6 @@ module Database.Schema.Message (MessageT (..), Message, MessageId) where
 
 import Data.UUID (UUID)
 import Data.Functor.Identity (Identity)
-import Data.Text (Text)
 import Data.Time (UTCTime)
 import Database.Beam
   ( Beamable
@@ -18,11 +17,12 @@ import Database.Beam
   )
 import GHC.Generics (Generic)
 import Crypto qualified
+import UserId (UserId)
 
 data MessageT f = Message
   { messageId :: Columnar f UUID
-  , fromUser :: Columnar f Text
-  , toUser :: Columnar f Text
+  , fromUser :: Columnar f UserId
+  , toUser :: Columnar f UserId
   , messageTimestamp :: Columnar f UTCTime
   , messageSignature :: Columnar f Crypto.Signature
   , payload :: Columnar f Crypto.EncryptedMessage

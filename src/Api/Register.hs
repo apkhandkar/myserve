@@ -14,7 +14,6 @@ import Data.UUID (UUID)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (ToJSON, FromJSON)
 import Data.Int (Int32)
-import Data.Text (Text)
 import Data.Time (getCurrentTime)
 import Database.Beam
   ( aggregate_
@@ -36,6 +35,7 @@ import Database.Class (HasDb (runDb))
 import Database.Schema (DevDb (users), UserT (..), devDb)
 import GHC.Generics (Generic)
 import Handler (MyServeHandler)
+import UserId(UserId)
 import Servant
   ( JSON
   , Post
@@ -54,7 +54,7 @@ type Register =
     :> Post '[JSON] RegisterResponse 
 
 data RegisterRequest = RegisterRequest
-  {requestedUserId :: Text}
+  {requestedUserId :: UserId}
   deriving (Generic, FromJSON)
 
 data RegisterResponse = RegisterResponse

@@ -23,7 +23,7 @@ import Database.Schema.RequestLog as X
   ( RequestLog
   , RequestLogT (..)
   )
-import Database.Schema.User as X (User, UserId, UserT (..))
+import Database.Schema.User as X (User, UserT (..))
 import Database.Schema.Message as X (Message, MessageId, MessageT (..))
 import GHC.Generics (Generic)
 

@@ -8,9 +8,9 @@
 
 module Api.SendMessage (SendMessage, sendMessage) where
 
-import Auth (PostAuth (KeepToken), UserId, WithTokenAuth)
+import UserId (UserId)
+import Auth (PostAuth (KeepToken), WithTokenAuth)
 import Data.Aeson (FromJSON)
-import Data.Text (Text)
 import GHC.Generics (Generic)
 import Handler (MyServeHandler)
 import LogRequest (LogMode (..), LogRequest)
@@ -40,7 +40,7 @@ type SendMessage =
 
 data SendMessageRequest = SendMessageRequest
   { messageId :: UUID
-  , recipient :: Text
+  , recipient :: UserId
   , timestamp :: UTCTime
   , payload :: Crypto.EncryptedMessage
   , symmetricKey :: Crypto.EncryptedSymmetricKey
