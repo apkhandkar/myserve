@@ -84,6 +84,9 @@ instance FromJSON Signature where
       Left err -> fail err
       Right sig -> pure $ Signature sig
 
+instance ToJSON Signature where
+  toJSON = toJSON . convertAndEncode . getSignature
+
 instance HasSqlValueSyntax PgValueSyntax Signature where
   sqlValueSyntax = sqlValueSyntax . convertAndEncode . getSignature
 
@@ -213,6 +216,9 @@ instance FromJSON EncryptedSymmetricKey where
       Left err -> fail $ "Failed to decode base64-encoded encrypted AES-256 key: " <> err
       Right key -> pure $ EncryptedSymmetricKey key
 
+instance ToJSON EncryptedSymmetricKey where
+  toJSON = toJSON . encodeBase64 . getEncryptedSymmetricKey
+
 instance HasSqlValueSyntax PgValueSyntax EncryptedSymmetricKey where
   sqlValueSyntax = sqlValueSyntax . encodeBase64 . getEncryptedSymmetricKey
 
@@ -241,6 +247,9 @@ instance FromJSON Nonce where
         CryptoFailed err' -> fail $ "Failed to create nonce: " <> show err'
         CryptoPassed nonce -> pure $ Nonce nonce
 
+instance ToJSON Nonce where
+  toJSON = toJSON . convertAndEncode . getNonce
+
 instance HasSqlValueSyntax PgValueSyntax Nonce where
   sqlValueSyntax = sqlValueSyntax . convertAndEncode . getNonce
 
@@ -265,6 +274,9 @@ instance FromJSON AuthTag where
       Left err -> fail $ "Failed to decode base64-encoded authentication tag: " <> err
       Right authTag -> pure $ AuthTag $ Cipher.AuthTag $ convert authTag
 
+instance ToJSON AuthTag where
+  toJSON = toJSON . convertAndEncode . getAuthTag
+
 instance HasSqlValueSyntax PgValueSyntax AuthTag where
   sqlValueSyntax = sqlValueSyntax . convertAndEncode . getAuthTag
 
@@ -274,6 +286,6 @@ newtype PlaintextMessage = PlaintextMessage {plaintextMessageToText :: Text}
 
 -- | Encrypted message
 newtype EncryptedMessage = EncryptedMessage {encryptedMessageToText :: Text}
-  deriving newtype (Show, FromJSON, HasSqlValueSyntax PgValueSyntax, FromField, FromBackendRow Postgres)
+  deriving newtype (Show, FromJSON, ToJSON, HasSqlValueSyntax PgValueSyntax, FromField, FromBackendRow Postgres)
 
 

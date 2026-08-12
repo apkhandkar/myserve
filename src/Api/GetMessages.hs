@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
 
 module Api.GetMessages
   ( GetMessages
@@ -8,7 +10,9 @@ module Api.GetMessages
   )
 where
 
+import Data.Aeson (ToJSON)
 import Database.Schema qualified as Schema
+import GHC.Generics (Generic)
 import Servant (Get, JSON, (:>))
 import LogRequest (LogRequest, LogMode(StdoutLog))
 import Auth (WithTokenAuth, PostAuth(KeepToken))
@@ -36,7 +40,7 @@ data GetMessagesResponse = GetMessagesResponse
   , encryptedSymmetricKey :: Crypto.EncryptedSymmetricKey
   , authenticationTag :: Crypto.AuthTag
   , nonce :: Crypto.Nonce
-  }
+  } deriving (Generic, ToJSON)
 
 getMessages :: UserId -> MyServeHandler [GetMessagesResponse]
 getMessages userId =
