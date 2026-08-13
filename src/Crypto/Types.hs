@@ -35,16 +35,25 @@ import Crypto.PubKey.Ed25519 qualified as Ed25519
 import Data.Either.Extra (mapLeft)
 import Crypto.Error (eitherCryptoError, CryptoFailable(CryptoFailed, CryptoPassed))
 import Data.Text qualified as Text
-import Database.PostgreSQL.Simple.FromField (FromField(fromField), returnError)
+import Database.PostgreSQL.Simple.FromField (FromField(fromField), returnError, Field, Conversion)
 import Crypto.Number.ModArithmetic (inverse)
 import Crypto.Cipher.Types qualified as Cipher
 import Data.ByteArray (convert)
+import Data.Data (Typeable)
 
 -- | ED25519 secret key
 newtype SigningKey = SigningKey {getSigningKey :: Ed25519.SecretKey}
 
 instance Show SigningKey where
   show = Text.unpack . convertAndEncode . getSigningKey
+
+instance FromJSON SigningKey where
+  parseJSON = withText "Signing key" $ \encodedKey ->
+    case decodeBase64 encodedKey of
+      Left err -> fail err
+      Right bytes -> case Ed25519.secretKey bytes of
+        CryptoFailed err -> fail $ "Failed to construct ED25519 signing key: " <> show err
+        CryptoPassed key -> pure $ SigningKey key
 
 instance ToJSON SigningKey where
   toJSON = toJSON . convertAndEncode . getSigningKey
@@ -55,15 +64,20 @@ newtype VerificationKey = VerificationKey {getVerificationKey :: Ed25519.PublicK
 instance Show VerificationKey where
   show = Text.unpack . convertAndEncode . getVerificationKey
 
+instance FromJSON VerificationKey where
+  parseJSON = withText "Verification key" $ \encodedKey ->
+    case decodeEd25519PubKey encodedKey of
+      Left err -> fail err
+      Right key -> pure $ VerificationKey key
+
+instance ToJSON VerificationKey where
+  toJSON = toJSON . convertAndEncode . getVerificationKey
+
 instance HasSqlValueSyntax PgValueSyntax VerificationKey where
   sqlValueSyntax = sqlValueSyntax . convertAndEncode . getVerificationKey
 
 instance FromField VerificationKey where
-  fromField field metadata = do
-    encodedKey <- fromField field metadata
-    case decodeEd25519PubKey encodedKey of
-      Left err -> returnError ConversionFailed field err
-      Right key -> pure $ VerificationKey key
+  fromField = fromFieldHelper decodeEd25519PubKey VerificationKey
 
 instance FromBackendRow Postgres VerificationKey
 
@@ -91,11 +105,7 @@ instance HasSqlValueSyntax PgValueSyntax Signature where
   sqlValueSyntax = sqlValueSyntax . convertAndEncode . getSignature
 
 instance FromField Signature where
-  fromField field metadata = do
-    encodedKey <- fromField field metadata
-    case decodeEd25519Signature encodedKey of
-      Left err -> returnError ConversionFailed field err
-      Right sig -> pure $ Signature sig
+  fromField = fromFieldHelper decodeEd25519Signature Signature
 
 instance FromBackendRow Postgres Signature
 
@@ -118,12 +128,18 @@ instance FromField EncryptionKey where
     encodedKey <- fromField field metadata
     case decodePublicKey encodedKey of
       Nothing -> returnError ConversionFailed field "Failed to decode base58-encoded RSA public key"
-      Just sig -> pure $ EncryptionKey sig
+      Just key -> pure $ EncryptionKey key
 
 instance FromBackendRow Postgres EncryptionKey
 
 instance ToJSON EncryptionKey where
   toJSON = toJSON . encodePublicKey . getEncryptionKey
+
+instance FromJSON EncryptionKey where
+  parseJSON = withText "Encryption key" $ \encodedKey ->
+    case decodePublicKey encodedKey of
+      Nothing -> fail "Failed to decode base58-encoded RSA public key"
+      Just key -> pure $ EncryptionKey key
 
 -- | Encode an RSA public key to its base58 representation
 encodePublicKey :: RSA.PublicKey -> Text
@@ -152,6 +168,12 @@ instance Show DecryptionKey where
 
 instance ToJSON DecryptionKey where
   toJSON = toJSON . encodePrivateKey . getDecryptionKey
+
+instance FromJSON DecryptionKey where
+  parseJSON = withText "Decryption Key" $ \encodedKey ->
+    case decodePrivateKey encodedKey of
+      Nothing -> fail "Failed to decode base58-encoded RSA private key"
+      Just key -> pure $ DecryptionKey key
 
 -- | Encode an RSA private key to its base58 representation
 encodePrivateKey :: RSA.PrivateKey -> Text
@@ -202,11 +224,7 @@ instance Show EncryptedSymmetricKey where
   show = Text.unpack . encodeBase64 . getEncryptedSymmetricKey
 
 instance FromField EncryptedSymmetricKey where
-  fromField field metadata = do
-    encodedKey <- fromField field metadata
-    case decodeBase64 encodedKey of
-      Left err -> returnError ConversionFailed field err
-      Right key -> pure $ EncryptedSymmetricKey key
+  fromField = fromFieldHelper decodeBase64 EncryptedSymmetricKey
 
 instance FromBackendRow Postgres EncryptedSymmetricKey
 
@@ -260,11 +278,7 @@ instance Show AuthTag where
   show = Text.unpack . convertAndEncode . getAuthTag
 
 instance FromField AuthTag where
-  fromField field metadata = do
-    encodedAuthTag <- fromField field metadata
-    case decodeBase64 encodedAuthTag of
-      Left err -> returnError ConversionFailed field err
-      Right authTag -> pure $ AuthTag $ Cipher.AuthTag $ convert authTag
+  fromField = fromFieldHelper decodeBase64 (AuthTag . Cipher.AuthTag . convert)
 
 instance FromBackendRow Postgres AuthTag
 
@@ -288,4 +302,10 @@ newtype PlaintextMessage = PlaintextMessage {plaintextMessageToText :: Text}
 newtype EncryptedMessage = EncryptedMessage {encryptedMessageToText :: Text}
   deriving newtype (Show, FromJSON, ToJSON, HasSqlValueSyntax PgValueSyntax, FromField, FromBackendRow Postgres)
 
-
+fromFieldHelper
+  :: (FromField f, Typeable b) => (f -> Either String a) -> (a -> b) -> Field -> Maybe ByteString -> Conversion b
+fromFieldHelper decoder mkValue field metadata = do
+  encodedValue <- fromField field metadata
+  case decoder encodedValue of
+    Left err -> returnError ConversionFailed field err
+    Right value -> pure $ mkValue value

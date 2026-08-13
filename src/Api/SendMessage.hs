@@ -6,11 +6,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 
-module Api.SendMessage (SendMessage, sendMessage) where
+module Api.SendMessage (SendMessage, SendMessageRequest(..), sendMessage) where
 
 import UserId (UserId)
 import Auth (PostAuth (KeepToken), WithTokenAuth)
-import Data.Aeson (FromJSON)
+import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 import Handler (MyServeHandler)
 import LogRequest (LogMode (..), LogRequest)
@@ -47,7 +47,7 @@ data SendMessageRequest = SendMessageRequest
   , authenticationTag :: Crypto.AuthTag
   , nonce :: Crypto.Nonce
   , signature :: Crypto.Signature
-  } deriving (Generic, FromJSON)
+  } deriving (Generic, FromJSON, ToJSON)
 
 -- | Greet a user
 sendMessage :: UserId -> SendMessageRequest -> MyServeHandler NoContent

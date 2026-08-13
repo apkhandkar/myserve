@@ -5,7 +5,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 
 module UserId
-  ( UserId(userIdToText)
+  ( UserId(userIdToText, UserId)
   , mkUserId
   )
 where
@@ -20,7 +20,7 @@ import Database.PostgreSQL.Simple.FromField (FromField(fromField), returnError, 
 import Database.Beam.Postgres (Postgres)
 import Data.Aeson (FromJSON(parseJSON), withText, ToJSON(toJSON))
 import Database.Beam (HasSqlEqualityCheck)
-import Servant (FromHttpApiData(parseUrlPiece))
+import Servant (FromHttpApiData(parseUrlPiece), ToHttpApiData(toUrlPiece))
 import Data.Either.Extra (mapLeft)
 
 newtype UserId = UserId {userIdToText :: Text}
@@ -61,3 +61,6 @@ mkUserId (Text.toLower -> userId) = do
   pure $ UserId userId
  where
   isValidChar c = Char.isLower c || Char.isDigit c  || c == '.' || c == '_'
+
+instance ToHttpApiData UserId where
+  toUrlPiece = userIdToText

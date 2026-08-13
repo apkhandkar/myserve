@@ -13,6 +13,7 @@ dependencies:
 - beam-postgres
 - crypton
 - bytestring
+- http-client
 - memory
 - envy
 - extra
@@ -20,6 +21,8 @@ dependencies:
 - postgresql-migration
 - resource-pool
 - servant-server
+- servant-client
+- servant-client-core
 - time
 - warp
 - wai

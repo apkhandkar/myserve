@@ -1,81 +1,138 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Demo
-  ( runDemo
+  ( registerUser
+  , runLocalhostClient
+  , sendMessage
+  , receiveMessages
   )
 where
-
 import Crypto qualified
+import Network.HTTP.Client (newManager, defaultManagerSettings)
+import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), ClientM, ClientError, runClientM)
+import Api.Client qualified as Client
+import Api.Register (RegisterResponse(..), RegisterRequest (RegisterRequest))
+import Api.SendMessage (SendMessageRequest(SendMessageRequest))
+import Data.Text (Text)
+import UserId qualified
+import Data.UUID.V4 qualified as UUID
+import Data.Time (getCurrentTime)
+import Control.Monad.IO.Class (MonadIO)
+import Control.Exception (Exception)
+import Control.Monad (void, forM_)
+import Api.GetMessages (GetMessagesResponse(fromUser, payload, nonce, messageSignature, encryptedSymmetricKey, authenticationTag, messageTimestamp))
+import Crypto (PlaintextMessage(PlaintextMessage))
 
-runDemo :: IO ()
-runDemo = do
-  -- Happy path scenario
-  -- Generate sender's keys
-  (senderVerKey, senderSigKey) <- Crypto.generateSigningKeyPair
-  putStrLn $ "Sender's verification key: " <> show senderVerKey
-  separator
-  putStrLn $ "Sender's signing key: " <> show senderSigKey
-  separator
-  -- Generate recipient's keys
-  (recipientEncKey, recipientDecKey) <- Crypto.generateEncryptionKeyPair
-  (recipientVerKey, _) <- Crypto.generateSigningKeyPair
-  putStrLn $ "Recipient's encryption key: " <> show recipientEncKey
-  separator
-  putStrLn $ "Recipient's decryption key: " <> show recipientDecKey
-  separator
-  -- Message from sender to recipient
-  let plaintextMessage = Crypto.PlaintextMessage "Hello recipient! How are we today?"
-  putStrLn $ "Plaintext message: " <> show plaintextMessage
-  separator
-  -- Generate a symmetric key and nonce to encrypt sender's message
-  senderSymmetricKey <- Crypto.generateSymmetricKey
-  senderNonce <- Crypto.generateNonce
-  putStrLn $ "Sender's symmetric key: " <> show senderSymmetricKey
-  separator
-  putStrLn $ "Sender's nonce: " <> show senderNonce
-  separator
-  -- Encrypt sender's plaintext message
+localhostBaseUrl :: BaseUrl
+localhostBaseUrl = BaseUrl
+  { baseUrlScheme = Http
+  , baseUrlHost = "localhost"
+  , baseUrlPort = 8080
+  , baseUrlPath = ""
+  }
+
+runLocalhostClient :: ClientM a -> IO (Either ClientError a)
+runLocalhostClient client = do
+  manager <- newManager defaultManagerSettings
+  let clientEnv = mkClientEnv manager localhostBaseUrl
+  runClientM client clientEnv
+
+-- | 'RegisterResponse' contains everything needed to save user state
+type UserState = RegisterResponse
+
+registerUser
+  :: Text
+  -- ^ Requested user ID
+  -> IO UserState
+  -- ^ Used for all future requests by this user
+registerUser requestedUserId =
+  case UserId.mkUserId requestedUserId of
+    Left err -> error $ "Not a valid user ID: " <> err
+    Right userId -> do
+      registerResponseEi <- runLocalhostClient $ Client.register $ RegisterRequest userId
+      case registerResponseEi of
+        Left clientError -> error $ "Client error: " <> show clientError
+        Right resp -> pure resp
+
+sendMessage
+  :: UserState
+  -- ^ Sender
+  -> Text
+  -- ^ Recipient's user ID
+  -> Text
+  -- ^ Message
+  -> IO ()
+sendMessage userState recipient message = do
+  let recipientUserId = either (\e -> error $ "Not a valid user ID: " <> e) id $ UserId.mkUserId recipient
+  -- get recipient's encryption key (RSA public key)
+  encryptionKey <-
+    errEither (runLocalhostClient $ Client.getEncryptionKey (authToken userState) recipientUserId) "Client error"
+  -- generate AES symmetric key and nonce
+  symmetricKey <- Crypto.generateSymmetricKey
+  nonce' <- Crypto.generateNonce
+  -- encrypt plaintext message using symmetric key
   let (authTag, encryptedMessage) =
-        eitherToError $ Crypto.encryptMessage senderSymmetricKey senderNonce plaintextMessage
-  putStrLn $ "Authentication tag: " <> show authTag
-  separator
-  putStrLn $ "Encrypted message: " <> show encryptedMessage
-  separator
-  -- Encrypt the symmetric key for sender's message with recipient's encryption key
-  senderEncryptedSymmetricKey <- maybeToError <$> Crypto.encryptSymmetricKey recipientEncKey senderSymmetricKey
-  putStrLn $ "Encrypted symmetric key: " <> show senderEncryptedSymmetricKey
-  separator
-  -- Sign the encrypted message
-  let senderSignature = eitherToError $ Crypto.sign senderSigKey encryptedMessage
-  putStrLn $ "Signature: " <> show senderSignature
-  separator
-  -- recipient receives sender's message
-  -- Show verification token
-  let verificationToken = eitherToError $ Crypto.generateVerificationToken senderVerKey recipientVerKey
-  putStrLn $ "Verification token: " <> show verificationToken
-  separator
-  -- Verify the signature
-  let verificationResult =  eitherToError $ Crypto.verify senderVerKey encryptedMessage senderSignature
-  if verificationResult
-    then putStrLn "Authenticity verified!" >> separator
-    else error "Authenticity not verified!"
-  -- Decrypt the symmetric key
-  let decryptedSymmetricKey = maybeToError $ Crypto.decryptSymmetricKey recipientDecKey senderEncryptedSymmetricKey
-  putStrLn $ "Decrypted symmetric key: " <> show decryptedSymmetricKey
-  separator
-  -- Use decrypted symmetric key to decrypt message
-  let decryptedMessage = eitherToError $ Crypto.decryptMessage decryptedSymmetricKey senderNonce authTag encryptedMessage
-  putStrLn $ "Decrypted message: " <> show decryptedMessage
-  separator
-  if plaintextMessage == decryptedMessage
-    then putStrLn "Success!"
-    else putStrLn "Failure!"
- where
-  separator = putStrLn "==============================================="
+        either
+          (\e -> error $ "Failed to encrypt plaintext message: " <> show e)
+          id
+          (Crypto.encryptMessage symmetricKey nonce' $ Crypto.PlaintextMessage message)
+  -- encrypt symmetric key using sender's decryption key (RSA private key)
+  encryptedSymmetricKey' <-
+        maybe
+          (error "Failed to encrypt symmetric key")
+          pure
+          =<< Crypto.encryptSymmetricKey encryptionKey symmetricKey
+  -- sign message
+  let signature = either (\err -> error $ "Failed to sign message: " <> show err) id $ Crypto.sign (signingKey userState) encryptedMessage
+  messageId <- UUID.nextRandom
+  messageTimestamp' <- getCurrentTime
+  let request =
+        SendMessageRequest
+          messageId
+          recipientUserId
+          messageTimestamp'
+          encryptedMessage
+          encryptedSymmetricKey'
+          authTag
+          nonce'
+          signature
+  void $ errEither (runLocalhostClient $ Client.sendMessage (authToken userState) request) "Client error"
 
-eitherToError :: Show s => Either s a -> a
-eitherToError = either (error . show) id
+receiveMessages
+  :: UserState
+  -> IO ()
+receiveMessages userState = do
+  messages <- errEither (runLocalhostClient $ Client.getMessages (authToken userState)) "Client error"
+  forM_ messages $ \message -> do
+    -- Fetch sender's verification key
+    senderVerificationKey <-
+      errEither (runLocalhostClient $ Client.getVerificationKey (authToken userState) (fromUser message)) "Client error"
+    -- Verify signature
+    let verified =
+          either
+            (\err -> error $ "Failed to verify signature: " <> show err)
+            id
+            $ Crypto.verify senderVerificationKey (payload message) (messageSignature message)
+    if not verified
+      then putStrLn "Signature verification failed!"
+      else do
+        -- Decrypt symmetric key
+        let symmetricKey =
+              maybe
+                (error "Failed to decrypt symmetric key!")
+                id
+                $ Crypto.decryptSymmetricKey (decryptionKey userState) (encryptedSymmetricKey message)
+        let result = Crypto.decryptMessage symmetricKey (nonce message) (authenticationTag message) (payload message)
+        case result of
+          Left err -> error $ "Failed to decrypt message: " <> show err
+          Right msg -> do
+            putStrLn "================"
+            putStrLn $ "From: " <> show (fromUser message)
+            putStrLn $ "Time: " <> show (messageTimestamp message)
+            putStrLn $ "Message: " <> show (Crypto.plaintextMessageToText msg)
+            putStrLn "================"
 
-maybeToError :: Maybe a -> a
-maybeToError = maybe (error "Got Nothing!") id
+errEither :: (MonadIO m, Exception a) => m (Either a b) -> String -> m b
+errEither doEi preface = doEi >>= either (\err -> error $ preface <> ": " <> show err) pure

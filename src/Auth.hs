@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -55,6 +56,9 @@ import Servant.Server.Internal
   , addAuthCheck
   , delayedFailFatal
   )
+import Servant.Client (HasClient(Client, clientWithRoute, hoistClientMonad))
+import Servant.Client.Core (addHeader)
+import Data.UUID (UUID)
 
 -- | What happens with the token after authentication.
 data PostAuth
@@ -140,3 +144,10 @@ instance
                             (\u -> userId u ==. val_ userId')
                   pure userId'
         Just (Left _) -> delayedFailFatal err401
+
+instance HasClient m api => HasClient m (WithTokenAuth postAuth :> api) where
+  type Client m (WithTokenAuth postAuth :> api) = UUID -> Client m api
+
+  clientWithRoute pm _ req token = clientWithRoute pm (Proxy @api) (addHeader "Authorization" token req)
+
+  hoistClientMonad pm _ f cl token = hoistClientMonad pm (Proxy @api) f (cl token)

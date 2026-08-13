@@ -8,7 +8,12 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 
-module Api.Register (Register, register) where
+module Api.Register
+  ( Register
+  , RegisterResponse(..)
+  , RegisterRequest(..)
+  , register
+  ) where
 
 import Data.UUID (UUID)
 import Control.Monad.IO.Class (liftIO)
@@ -55,14 +60,14 @@ type Register =
 
 data RegisterRequest = RegisterRequest
   {requestedUserId :: UserId}
-  deriving (Generic, FromJSON)
+  deriving (Generic, FromJSON, Show, ToJSON)
 
 data RegisterResponse = RegisterResponse
   { decryptionKey :: Crypto.DecryptionKey
   , signingKey :: Crypto.SigningKey
   , authToken :: UUID
   }
-  deriving (Generic, ToJSON)
+  deriving (Generic, FromJSON, Show, ToJSON)
 
 register
   :: RegisterRequest -> MyServeHandler RegisterResponse 

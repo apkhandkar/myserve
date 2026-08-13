@@ -7,10 +7,11 @@
 module Api.GetMessages
   ( GetMessages
   , getMessages
+  , GetMessagesResponse(..)
   )
 where
 
-import Data.Aeson (ToJSON)
+import Data.Aeson (ToJSON, FromJSON)
 import Database.Schema qualified as Schema
 import GHC.Generics (Generic)
 import Servant (Get, JSON, (:>))
@@ -22,7 +23,7 @@ import Data.UUID (UUID)
 import Data.Time (UTCTime)
 import Handler (MyServeHandler)
 import Database.Class (HasDb(runDb))
-import Database.Beam (select, runSelectReturningList, filter_, all_, val_, (==.))
+import Database.Beam (select, runSelectReturningList, filter_, all_, val_, (==.), runDelete, delete)
 
 type GetMessages =
   "v1"
@@ -40,16 +41,21 @@ data GetMessagesResponse = GetMessagesResponse
   , encryptedSymmetricKey :: Crypto.EncryptedSymmetricKey
   , authenticationTag :: Crypto.AuthTag
   , nonce :: Crypto.Nonce
-  } deriving (Generic, ToJSON)
+  } deriving (Generic, ToJSON, FromJSON)
 
 getMessages :: UserId -> MyServeHandler [GetMessagesResponse]
-getMessages userId =
-  runDb $
+getMessages userId = runDb $ do
+  messages <-
     fmap (fmap toResponse) $
       runSelectReturningList $
         select $
           filter_ (\message -> Schema.toUser message ==. val_ userId) $
             all_ (Schema.messages Schema.devDb)
+  runDelete $
+    delete
+      (Schema.messages Schema.devDb)
+      (\message -> Schema.toUser message ==. val_ userId)
+  pure messages
  where
   toResponse :: Schema.Message -> GetMessagesResponse
   toResponse msg =

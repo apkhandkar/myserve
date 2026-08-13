@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module LogRequest (LogRequest, LogMode (..)) where
 
@@ -26,6 +27,7 @@ import Database.Schema.RequestLog (RequestLog, mkRequestLog)
 import Network.Wai (rawPathInfo, remoteHost, requestHeaders)
 import Servant ((:>))
 import Servant.Server.Internal (HasContextEntry (..), HasServer (..))
+import Servant.Client (HasClient(Client, clientWithRoute, hoistClientMonad))
 
 -- | Log an incoming request
 data LogRequest (modes :: [LogMode])
@@ -82,3 +84,10 @@ instance
         runInsert $
           insert (requestLogs devDb) $
             insertValues [requestLog]
+
+instance HasClient m api => HasClient m (LogRequest modes :> api) where
+  type Client m (LogRequest modes :> api) = Client m api
+
+  clientWithRoute pm _ = clientWithRoute pm (Proxy @api)
+
+  hoistClientMonad pm _ = hoistClientMonad pm (Proxy @api)
