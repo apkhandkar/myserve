@@ -18,6 +18,8 @@ module Crypto.Types
   , PlaintextMessage(..)
   , EncryptedMessage(..)
   , decodePrivateKey
+  , AssociatedData(..)
+  , encodeAssociatedData
   )
 where
 
@@ -40,6 +42,10 @@ import Crypto.Number.ModArithmetic (inverse)
 import Crypto.Cipher.Types qualified as Cipher
 import Data.ByteArray (convert)
 import Data.Data (Typeable)
+import UserId (UserId (userIdToText))
+import Data.UUID (UUID, toASCIIBytes)
+import Data.Time (UTCTime, formatTime, defaultTimeLocale)
+import Data.ByteString.Char8 qualified as Char8
 
 -- | ED25519 secret key
 newtype SigningKey = SigningKey {getSigningKey :: Ed25519.SecretKey}
@@ -309,3 +315,19 @@ fromFieldHelper decoder mkValue field metadata = do
   case decoder encodedValue of
     Left err -> returnError ConversionFailed field err
     Right value -> pure $ mkValue value
+
+data AssociatedData = AssociatedData
+  { fromUser :: UserId
+  , toUser :: UserId
+  , messageId :: UUID
+  , messageTimestamp :: UTCTime
+  } deriving Show
+
+-- | Encoding used for encryption and decryption. Truncate timestamp to seconds to avoid
+-- loss of information after database roundtrip.
+encodeAssociatedData :: AssociatedData -> ByteString
+encodeAssociatedData AssociatedData{..} =
+  (encodeUtf8 $ userIdToText $ fromUser)
+  <> (encodeUtf8 $ userIdToText $ toUser)
+  <> (toASCIIBytes messageId)
+  <> (Char8.pack $ formatTime defaultTimeLocale "%X" messageTimestamp)

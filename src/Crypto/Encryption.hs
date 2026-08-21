@@ -25,7 +25,6 @@ import qualified Crypto.PubKey.RSA.OAEP as OAEP
 import Crypto.PubKey.RSA (generate)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import qualified Data.ByteString as ByteString
 import Crypto.Cipher.Types (cipherInit)
 import Crypto.Cipher.AES (AES256)
 import qualified Crypto.Cipher.AESGCMSIV as AESGCM
@@ -54,11 +53,16 @@ encryptMessage
   :: Types.SymmetricKey
   -> Types.Nonce
   -> Types.PlaintextMessage
+  -> Types.AssociatedData
   -> Either SymmetricKeyError (Types.AuthTag, Types.EncryptedMessage)
-encryptMessage aesKey nonce message = do
+encryptMessage aesKey nonce message associatedData = do
   cipher <- initCipher aesKey
   let (rawAuthTag, encryptedMessageRawBytes) =
-        AESGCM.encrypt cipher (Types.getNonce nonce) ByteString.empty (encodeUtf8 $ Types.plaintextMessageToText message)
+        AESGCM.encrypt
+          cipher
+          (Types.getNonce nonce)
+          (Types.encodeAssociatedData associatedData)
+          (encodeUtf8 $ Types.plaintextMessageToText message)
       encryptedMessage = Types.EncryptedMessage $ Encoding.encodeBase64 encryptedMessageRawBytes
       authTag = Types.AuthTag rawAuthTag
   pure (authTag, encryptedMessage)
@@ -69,8 +73,9 @@ decryptMessage
   -> Types.Nonce
   -> Types.AuthTag
   -> Types.EncryptedMessage
+  -> Types.AssociatedData
   -> Either SymmetricKeyError Types.PlaintextMessage
-decryptMessage aesKey nonce authTag encryptedMessage = do
+decryptMessage aesKey nonce authTag encryptedMessage associatedData = do
   cipher <- initCipher aesKey
   encryptedMessageRawBytes <- case (Encoding.decodeBase64 $ Types.encryptedMessageToText encryptedMessage) of
     Left _ -> Left MessageEncodingError
@@ -79,7 +84,13 @@ decryptMessage aesKey nonce authTag encryptedMessage = do
     maybe
       (Left DecryptionFailure)
       pure
-      (AESGCM.decrypt cipher (Types.getNonce nonce) ByteString.empty encryptedMessageRawBytes (Types.getAuthTag authTag))
+      ( AESGCM.decrypt
+          cipher
+          (Types.getNonce nonce)
+          (Types.encodeAssociatedData associatedData) 
+          encryptedMessageRawBytes
+          (Types.getAuthTag authTag)
+      )
   pure $ Types.PlaintextMessage $ decodeUtf8 decrypted
 
 initCipher :: Types.SymmetricKey -> Either SymmetricKeyError AES256

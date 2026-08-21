@@ -7,6 +7,7 @@ module Demo
   , runLocalhostClient
   , sendMessage
   , receiveMessages
+  , getVerificationToken
   )
 where
 import Crypto qualified
@@ -22,8 +23,9 @@ import Data.Time (getCurrentTime)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Exception (Exception)
 import Control.Monad (void, forM_)
-import Api.GetMessages (GetMessagesResponse(fromUser, payload, nonce, messageSignature, encryptedSymmetricKey, authenticationTag, messageTimestamp))
+import Api.GetMessages (GetMessagesResponse(fromUser, messageId, payload, nonce, messageSignature, encryptedSymmetricKey, authenticationTag, messageTimestamp))
 import Crypto (PlaintextMessage(PlaintextMessage))
+import UserId (UserId)
 
 localhostBaseUrl :: BaseUrl
 localhostBaseUrl = BaseUrl
@@ -40,7 +42,7 @@ runLocalhostClient client = do
   runClientM client clientEnv
 
 -- | 'RegisterResponse' contains everything needed to save user state
-type UserState = RegisterResponse
+type UserState = (RegisterResponse, UserId)
 
 registerUser
   :: Text
@@ -54,7 +56,21 @@ registerUser requestedUserId =
       registerResponseEi <- runLocalhostClient $ Client.register $ RegisterRequest userId
       case registerResponseEi of
         Left clientError -> error $ "Client error: " <> show clientError
-        Right resp -> pure resp
+        Right resp -> pure (resp, userId)
+
+getVerificationToken
+  :: UserState
+  -> Text
+  -- ^ Recipient's user ID
+  -> IO ()
+getVerificationToken (userState, userId) recipient = do
+  ourVerificationKey <-
+    errEither (runLocalhostClient $ Client.getVerificationKey (authToken userState) userId) "Client error"
+  let theirUserId = either (\e -> error $ "Not a valid user ID: " <> e) id $ UserId.mkUserId recipient
+  theirVerificationKey <-
+    errEither (runLocalhostClient $ Client.getVerificationKey (authToken userState) theirUserId) "Client error"
+  let verificationToken = Crypto.generateVerificationToken ourVerificationKey theirVerificationKey
+  putStrLn $ "Your verification token with " <> show recipient <> " is " <> show verificationToken
 
 sendMessage
   :: UserState
@@ -64,7 +80,7 @@ sendMessage
   -> Text
   -- ^ Message
   -> IO ()
-sendMessage userState recipient message = do
+sendMessage (userState, userId) recipient message = do
   let recipientUserId = either (\e -> error $ "Not a valid user ID: " <> e) id $ UserId.mkUserId recipient
   -- get recipient's encryption key (RSA public key)
   encryptionKey <-
@@ -73,11 +89,20 @@ sendMessage userState recipient message = do
   symmetricKey <- Crypto.generateSymmetricKey
   nonce' <- Crypto.generateNonce
   -- encrypt plaintext message using symmetric key
-  let (authTag, encryptedMessage) =
+  messageId' <- UUID.nextRandom
+  messageTimestamp' <- getCurrentTime
+  let associatedData =
+        Crypto.AssociatedData userId recipientUserId messageId' messageTimestamp'
+      (authTag, encryptedMessage) =
         either
           (\e -> error $ "Failed to encrypt plaintext message: " <> show e)
           id
-          (Crypto.encryptMessage symmetricKey nonce' $ Crypto.PlaintextMessage message)
+          ( Crypto.encryptMessage
+              symmetricKey
+              nonce' 
+              (Crypto.PlaintextMessage message)
+              associatedData
+          )
   -- encrypt symmetric key using sender's decryption key (RSA private key)
   encryptedSymmetricKey' <-
         maybe
@@ -86,11 +111,9 @@ sendMessage userState recipient message = do
           =<< Crypto.encryptSymmetricKey encryptionKey symmetricKey
   -- sign message
   let signature = either (\err -> error $ "Failed to sign message: " <> show err) id $ Crypto.sign (signingKey userState) encryptedMessage
-  messageId <- UUID.nextRandom
-  messageTimestamp' <- getCurrentTime
-  let request =
+      request =
         SendMessageRequest
-          messageId
+          messageId'
           recipientUserId
           messageTimestamp'
           encryptedMessage
@@ -103,7 +126,7 @@ sendMessage userState recipient message = do
 receiveMessages
   :: UserState
   -> IO ()
-receiveMessages userState = do
+receiveMessages (userState, userId) = do
   messages <- errEither (runLocalhostClient $ Client.getMessages (authToken userState)) "Client error"
   forM_ messages $ \message -> do
     -- Fetch sender's verification key
@@ -117,15 +140,27 @@ receiveMessages userState = do
             $ Crypto.verify senderVerificationKey (payload message) (messageSignature message)
     if not verified
       then putStrLn "Signature verification failed!"
-      else do
+      else
         -- Decrypt symmetric key
         let symmetricKey =
               maybe
                 (error "Failed to decrypt symmetric key!")
                 id
                 $ Crypto.decryptSymmetricKey (decryptionKey userState) (encryptedSymmetricKey message)
-        let result = Crypto.decryptMessage symmetricKey (nonce message) (authenticationTag message) (payload message)
-        case result of
+            associatedData =
+              Crypto.AssociatedData
+                (fromUser message)
+                userId
+                (messageId message)
+                (messageTimestamp message)
+            result =
+              Crypto.decryptMessage
+                symmetricKey
+                (nonce message)
+                (authenticationTag message)
+                (payload message)
+                associatedData
+        in case result of
           Left err -> error $ "Failed to decrypt message: " <> show err
           Right msg -> do
             putStrLn "================"

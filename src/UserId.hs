@@ -24,7 +24,10 @@ import Servant (FromHttpApiData(parseUrlPiece), ToHttpApiData(toUrlPiece))
 import Data.Either.Extra (mapLeft)
 
 newtype UserId = UserId {userIdToText :: Text}
-  deriving newtype (Eq, Show)
+  deriving newtype (Eq)
+
+instance Show UserId where
+  show = Text.unpack . userIdToText
 
 instance FromHttpApiData UserId where
   parseUrlPiece = mapLeft Text.pack . mkUserId
