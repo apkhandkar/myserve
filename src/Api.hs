@@ -3,6 +3,7 @@
 module Api (Api, handlers) where
 
 import Api.SendMessage (SendMessage, sendMessage)
+import Api.ServiceAvailable (ServiceAvailable, serviceAvailable)
 import Api.GetEncryptionKey (GetEncryptionKey, getEncryptionKey)
 import Api.GetVerificationKey (GetVerificationKey, getVerificationKey)
 import Api.GetMessages (GetMessages, getMessages)
@@ -12,7 +13,20 @@ import Handler (MyServeHandler)
 import Servant (ServerT, (:<|>) ((:<|>)))
 
 type Api =
-  Register :<|> GetEncryptionKey :<|> SendMessage :<|> GetMessages :<|> GetVerificationKey :<|> Logout
+  ServiceAvailable
+  :<|> Register
+  :<|> GetEncryptionKey
+  :<|> SendMessage
+  :<|> GetMessages
+  :<|> GetVerificationKey
+  :<|> Logout
 
 handlers :: ServerT Api MyServeHandler
-handlers = register :<|> getEncryptionKey :<|> sendMessage :<|> getMessages :<|> getVerificationKey :<|> logout
+handlers =
+  serviceAvailable
+  :<|> register
+  :<|> getEncryptionKey
+  :<|> sendMessage
+  :<|> getMessages
+  :<|> getVerificationKey
+  :<|> logout

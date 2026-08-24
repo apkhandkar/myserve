@@ -19,6 +19,7 @@ dependencies:
 - extra
 - postgresql-simple
 - postgresql-migration
+- optparse-applicative
 - resource-pool
 - servant-server
 - servant-client
@@ -51,9 +52,19 @@ library:
   source-dirs: src
 
 executables:
-  myserve-exe:
+  speakeasy-server:
     main:                Main.hs
-    source-dirs:         app
+    source-dirs:         server
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - myserve
+
+  speakeasy-client:
+    main:                Main.hs
+    source-dirs:         client
     ghc-options:
     - -threaded
     - -rtsopts

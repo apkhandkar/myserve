@@ -8,12 +8,14 @@ module Api.Client
  , register
  , sendMessage
  , logout
+ , serviceAvailable
  )
 where
 
 import Api.GetEncryptionKey (GetEncryptionKey)
 import Api.GetMessages (GetMessages, GetMessagesResponse)
 import Api.Register (Register, RegisterResponse, RegisterRequest)
+import Api.ServiceAvailable (ServiceAvailable)
 import Api.SendMessage (SendMessage, SendMessageRequest)
 import Api.Logout (Logout)
 import Servant.Client (ClientM, client)
@@ -41,3 +43,6 @@ sendMessage = client (Proxy @SendMessage)
 
 logout :: UUID -> ClientM NoContent
 logout = client (Proxy @Logout)
+
+serviceAvailable :: ClientM NoContent
+serviceAvailable = client (Proxy @ServiceAvailable)
