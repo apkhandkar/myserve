@@ -5,12 +5,13 @@
 
 module Main (main, ClientConfig(..), AppState(..)) where
 
+import Data.Set qualified as Set
 import Options.Applicative qualified as Opt
 import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, ClientEnv, ClientError (FailureResponse), ResponseF (responseStatusCode, responseBody))
 import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Api.Client (serviceAvailable, register, getMessages, getEncryptionKey, getVerificationKey)
 import System.Exit (exitFailure)
-import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad), txt, BrickEvent (VtyEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, defaultMain, AttrName, bg, strWrap, withAttr, attrName, on, halt)
+import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, defaultMain, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets)
 import Brick.Widgets.Edit (Editor, renderEditor, editorText, getEditContents, handleEditorEvent, applyEdit)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -36,6 +37,7 @@ import Data.List (sort)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
 import Crypto qualified
+import Data.Either (partitionEithers)
 
 data ClientConfig = ClientConfig
   { serverHost :: String
@@ -89,11 +91,23 @@ data AppState = AppState
   , _dialogError :: Dialog ErrorDialogButtons Name
   , _userIdValidationError :: Maybe String
   , _listConversations :: List Name UserId
-  , _focusConversation :: Maybe UserId
+  , _focusConversation :: Maybe FocusedUser
   , _userInbox :: [GetMessagesResponse]
   , _userOutbox :: [OutboundMessage]
   , _newConversation :: Bool
   , _userStore :: Map.Map UserId UserStore
+  , _invalidEvent :: Maybe InvalidEvent
+  }
+
+data InvalidEvent =
+  UserDataMissing
+ -- ^ We should have user data, but we couldn't find any
+
+data FocusedUser = FocusedUser
+  { focusedUserId :: UserId
+  , focusedUserIncomingMessages :: [GetMessagesResponse]
+  , focusedUserOutgoingMessages :: [OutboundMessage]
+  , focusedUserStore :: UserStore
   }
 
 data UserStore = UserStore
@@ -107,6 +121,12 @@ data OutboundMessage = OutboundMessage
   , messageTimestamp :: UTCTime
   , messageId :: UUID
   , messageBody :: Text
+  }
+
+data DecryptedMessage = DecryptedMessage
+  { decMessageTimestamp :: UTCTime
+  , ours :: Bool
+  , decMessageBody :: Text
   }
 
 makeLenses ''AppState
@@ -156,9 +176,19 @@ badRecipientAttempt appState = (isJust $ _userData appState) && (isJust $ _userI
 startNewConversation :: AppState -> Bool
 startNewConversation appState = appState ^. newConversation
 
+focusedConversation :: AppState -> Bool
+focusedConversation appState =
+  isJust (appState ^. userData)
+  && isNothing (appState ^. userIdValidationError)
+  && not (appState ^. newConversation)
+  && isJust (appState ^. focusConversation)
+
 atHome :: AppState -> Bool
 atHome appState =
-  (isJust $ appState ^. userData) && (isNothing $ appState ^. userIdValidationError) && (not $ appState ^. newConversation)
+  isJust (appState ^. userData)
+  && isNothing (appState ^. userIdValidationError)
+  && not (appState ^. newConversation)
+  && isNothing (appState ^. focusConversation)
 
 drawUi :: AppState -> [Widget Name]
 drawUi appState
@@ -168,18 +198,41 @@ drawUi appState
       [ invalidUserIdDialog (appState ^. dialogError) (appState ^. userIdValidationError)
       , userIdWelcomePrompt $ appState ^. popupTextInput
       ]
-  | atHome appState =
-      [borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)]
+  | atHome appState || focusedConversation appState = [conversationsScreen appState]
   | startNewConversation appState =
       [ recipientPrompt $ appState ^. popupTextInput
-      , borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
+      , conversationsScreen appState
       ]
   | badRecipientAttempt appState =
       [ invalidUserIdDialog (appState ^. dialogError) (appState ^. userIdValidationError)
       , recipientPrompt $ appState ^. popupTextInput
-      , borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
+      , conversationsScreen appState
       ]
   | otherwise = []
+
+conversationsScreen :: AppState -> Widget Name
+conversationsScreen appState =
+  vBox
+    [ hBox [
+      hLimit 50 $
+        borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
+    , case appState ^. focusConversation of
+        Nothing -> selectConversationStandbyScreen
+        Just focused -> conversation focused
+    ]
+    , padLeft (Pad 1) $ padRight (Pad 1) $ hBox [
+        padRight Max $ str "Logged in as wooblyfloof"
+      , padLeft Max $ str $ case appState ^. focusConversation of
+          Nothing -> "(n) New conversation (r) Refresh (h) Help (q) Quit"
+          Just _ -> "(Esc) Return to main menu"
+      ]
+    ]
+
+selectConversationStandbyScreen :: Widget Name
+selectConversationStandbyScreen = border $ vCenter $ hCenter (str "Select a conversation")
+
+conversation :: FocusedUser -> Widget Name
+conversation _ = border $ vCenter $ hCenter (str "Blah blah!")
 
 drawItem :: Bool -> UserId -> Widget Name
 drawItem isSelected name =
@@ -197,17 +250,12 @@ errorDialog :: Dialog ErrorDialogButtons Name
 errorDialog = dialog (Just $ str "Error") (Just (OkButton, choices)) 50
   where choices = [ ("Okay", OkButton, Ok)]
 
-refreshInbox :: UserData -> EventM Name AppState ()
-refreshInbox (registerResponse, _) = do
+withUserData :: (UserData -> EventM Name AppState ()) -> EventM Name AppState ()
+withUserData action = do
   appState <- get
-  responseEi <- liftIO $ runClientM (getMessages $ authToken registerResponse) (appState ^. clientEnv)
-  case responseEi of
-    Left _ -> do
-      -- handle this later
-      halt
-    Right resp -> do
-      let currentInbox = appState ^. userInbox
-      put $ appState & userInbox .~ (currentInbox <> resp)
+  case appState ^. userData of
+    Nothing -> put $ appState & invalidEvent .~ Just UserDataMissing
+    Just userData' -> action userData'
 
 handleEvent :: BrickEvent Name e -> EventM Name AppState ()
 handleEvent ev = do
@@ -247,14 +295,29 @@ handleEvent ev = do
   else if atHome appState
     then case ev of
       VtyEvent (EvKey (KChar 'r') []) -> do
-        case appState ^. userData of
-          Nothing -> halt -- can't happen!
-          Just hasUserData -> do
-            refreshInbox hasUserData
-            -- Get "froms"...
-            newState <- get
-            let s = getUserList (newState ^. userInbox) (newState ^. userOutbox)
-            put $ newState & listConversations .~ conversationsList s
+        withUserData $ \userData' -> do
+          -- We first fetch new messages that were addressed to us
+          responseEi <- liftIO $ runClientM (getMessages $ authToken $ fst userData') (appState ^. clientEnv)
+          newMessages <- case responseEi of
+              Left _ -> do
+                -- handle this later
+                error "Oops!"
+              Right resp -> pure resp
+          -- Get the set of user names from the new messages
+          let senderIds = Set.fromList $ fmap fromUser newMessages
+          -- Get the existing set of user IDs from our user store
+          existingUserIds <- fmap Map.keysSet $ gets _userStore
+          -- Compute the *new* user IDs that we need to add to our user store
+          let newUserIds = Set.difference senderIds existingUserIds
+              combinedUserIds = Set.union senderIds existingUserIds
+          -- Get user store data for new messages
+          -- Update user store...
+          (_, newUserStores) <- getUserStores (appState ^. clientEnv) (authToken $ fst userData') (Set.toList newUserIds)
+          let newElemMap = Map.fromList newUserStores
+          put $ appState
+              & listConversations .~ conversationsList (Set.toList combinedUserIds)
+              & userStore %~ Map.union newElemMap
+              & userInbox %~ (newMessages <>)
       VtyEvent (EvKey (KChar 'n') []) -> do
         -- new conversation
         put $ appState & newConversation .~ True
@@ -262,8 +325,19 @@ handleEvent ev = do
       VtyEvent (EvKey KEsc []) -> halt
       VtyEvent (EvKey KEnter []) ->
         case listSelectedElement (appState ^. listConversations) of
-          Nothing -> put appState
-          Just (_, selectedElement) -> put $ appState & focusConversation .~ Just selectedElement
+          Nothing -> pure () -- We have selected nothing, so do nothing
+          Just (_, selectedElement) -> do
+            let incoming = filter (\m -> fromUser m == selectedElement) $ appState ^. userInbox
+                outgoing = filter (\m -> toUser m == selectedElement) $ appState ^. userOutbox
+                userKeyStore = Map.lookup selectedElement $ appState ^. userStore
+            case userKeyStore of
+              Nothing -> do
+                -- this is a fatal error, it should never happen
+                halt
+              Just uks -> do
+                -- try and decrypt messages
+                put $ appState
+                    & focusConversation .~ Just (FocusedUser selectedElement incoming outgoing uks)
       VtyEvent vtyEvent -> zoom listConversations $ handleListEvent vtyEvent
       _ -> put appState
 
@@ -281,27 +355,18 @@ handleEvent ev = do
             case appState ^. userData of
               Nothing -> halt
               Just (registerResponse, _) -> do
-                encEi <-
-                  liftIO $
-                    runClientM
-                      (getEncryptionKey (authToken registerResponse) recipientUserId)
-                      (appState ^. clientEnv)
-                verEi <-
-                  liftIO $
-                    runClientM
-                      (getVerificationKey (authToken registerResponse) recipientUserId)
-                      (appState ^. clientEnv)
-                case (encEi, verEi) of
-                  (Right encKey, Right verKey) -> do
-                    let newUserStore =
-                          UserStore encKey verKey
+                userStoreEi <- getUserStore (appState ^. clientEnv) (authToken registerResponse) recipientUserId
+                case userStoreEi of
+                  Right (_, us) -> do
+                    let newMap = Map.insert recipientUserId us (appState ^. userStore)
                     put $ appState
                         & popupTextInput %~ applyEdit clearZipper
                         & newConversation .~ False
-                        & userStore %~ (Map.insert recipientUserId newUserStore)
-                  _ ->
+                        & userStore .~ newMap
+                        & listConversations .~ conversationsList (Map.keys newMap)
+                  Left err ->
                     put $ appState
-                        & userIdValidationError .~ Just "Server didn't like the user ID"
+                        & userIdValidationError .~ Just err
                         & newConversation .~ False
       VtyEvent (EvKey KEsc []) -> do
         put $ appState
@@ -318,7 +383,34 @@ handleEvent ev = do
       VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
       _ -> pure ()
 
+  else if focusedConversation appState
+    then case ev of
+      VtyEvent (EvKey KEsc []) -> put $ appState & focusConversation .~ Nothing
+      _ -> put appState
   else pure ()
+
+getUserStores :: MonadIO m => ClientEnv -> UUID -> [UserId] -> m ([String], [(UserId, UserStore)])
+getUserStores a b = fmap partitionEithers . traverse (getUserStore a b)
+
+-- Get user store for a user
+getUserStore :: MonadIO m => ClientEnv -> UUID -> UserId -> m (Either String (UserId, UserStore))
+getUserStore clientEnv' authToken' userId = do
+  encEi <-
+    liftIO $
+      runClientM
+        (getEncryptionKey authToken' userId)
+        clientEnv'
+  verEi <-
+    liftIO $
+      runClientM
+        (getVerificationKey authToken' userId)
+        clientEnv'
+  case (encEi, verEi) of
+    (Right encKey, Right verKey) -> do
+      let newUserStore =
+            UserStore encKey verKey
+      pure $ Right (userId, newUserStore)
+    _ -> pure $ Left "Server did not like that user name!"
 
 theApp :: App AppState e Name
 theApp = App
@@ -357,5 +449,6 @@ main = do
               []
               False
               Map.empty
+              Nothing
       _ <- defaultMain theApp initState
       pure ()
