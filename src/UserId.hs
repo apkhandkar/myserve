@@ -24,7 +24,7 @@ import Servant (FromHttpApiData(parseUrlPiece), ToHttpApiData(toUrlPiece))
 import Data.Either.Extra (mapLeft)
 
 newtype UserId = UserId {userIdToText :: Text}
-  deriving newtype (Eq)
+  deriving newtype (Eq, Ord)
 
 instance Show UserId where
   show = Text.unpack . userIdToText

@@ -10,6 +10,7 @@ module Crypto.Signing
  , sign
  , verify
  , generateVerificationToken
+ , VerificationToken
  )
 where
 

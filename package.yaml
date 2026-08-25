@@ -27,6 +27,7 @@ dependencies:
 - servant-client-core
 - time
 - warp
+- containers
 - wai
 - text
 - mtl
@@ -35,9 +36,10 @@ dependencies:
 - case-insensitive
 - uuid
 - vty
+- text-zipper
 - microlens-th
 - microlens
-- password
+- vector
 
 ghc-options:
 - -Wall
