@@ -9,6 +9,7 @@ dependencies:
 - base58-bytestring
 - base64-bytestring
 - base32
+- brick
 - beam-core
 - beam-postgres
 - crypton
@@ -33,6 +34,9 @@ dependencies:
 - http-types
 - case-insensitive
 - uuid
+- vty
+- microlens-th
+- microlens
 - password
 
 ghc-options:
