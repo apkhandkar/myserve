@@ -11,17 +11,17 @@ import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, Clie
 import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Api.Client (serviceAvailable, register, getMessages, getEncryptionKey, getVerificationKey)
 import System.Exit (exitFailure)
-import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, defaultMain, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets)
+import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, defaultMain, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom)
 import Brick.Widgets.Edit (Editor, renderEditor, editorText, getEditContents, handleEditorEvent, applyEdit)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Brick.Widgets.Dialog (renderDialog, Dialog, dialog, handleDialogEvent, buttonSelectedAttr)
-import Api.Register (RegisterResponse (authToken), RegisterRequest (RegisterRequest))
+import Api.Register (RegisterResponse (authToken, decryptionKey), RegisterRequest (RegisterRequest))
 import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
 import Data.Maybe (isNothing, isJust, fromMaybe)
-import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar), defAttr, Attr, yellow, white, blue)
+import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar), defAttr, Attr, yellow, white, blue, withStyle, italic, bold)
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Network.HTTP.Types (status412)
 import Data.ByteString.Char8 qualified as C8
@@ -29,15 +29,16 @@ import Lens.Micro ((^.), (.~), (&), (%~))
 import Data.ByteString qualified as BS
 import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelectedElement)
 import Data.Vector qualified as Vector
-import Api.GetMessages (GetMessagesResponse (fromUser))
-import Data.Time (UTCTime)
+import Api.GetMessages (GetMessagesResponse (fromUser, payload, messageSignature, encryptedSymmetricKey, messageId, messageTimestamp, nonce, authenticationTag))
+import Data.Time (UTCTime, getCurrentTime)
 import Data.Text.Zipper (clearZipper)
 import Data.UUID (UUID)
-import Data.List (sort)
+import Data.List (sort, sortOn)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
 import Crypto qualified
 import Data.Either (partitionEithers)
+import Crypto (PlaintextMessage(plaintextMessageToText))
 
 data ClientConfig = ClientConfig
   { serverHost :: String
@@ -91,7 +92,7 @@ data AppState = AppState
   , _dialogError :: Dialog ErrorDialogButtons Name
   , _userIdValidationError :: Maybe String
   , _listConversations :: List Name UserId
-  , _focusConversation :: Maybe FocusedUser
+  , _focusConversation :: Maybe (UserId, [DecryptedMessage])
   , _userInbox :: [GetMessagesResponse]
   , _userOutbox :: [OutboundMessage]
   , _newConversation :: Bool
@@ -118,9 +119,9 @@ data UserStore = UserStore
 
 data OutboundMessage = OutboundMessage
   { toUser :: UserId
-  , messageTimestamp :: UTCTime
-  , messageId :: UUID
-  , messageBody :: Text
+  , outboundMessageTimestamp :: UTCTime
+  , outboundMessageId :: UUID
+  , outboundMessageBody :: Text
   }
 
 data DecryptedMessage = DecryptedMessage
@@ -231,8 +232,21 @@ conversationsScreen appState =
 selectConversationStandbyScreen :: Widget Name
 selectConversationStandbyScreen = border $ vCenter $ hCenter (str "Select a conversation")
 
-conversation :: FocusedUser -> Widget Name
-conversation _ = border $ vCenter $ hCenter (str "Blah blah!")
+conversation :: (UserId, [DecryptedMessage]) -> Widget Name
+conversation (them, decMsgs) = border $ padRight Max $ vBox $ singleMessage <$> decMsgs
+ where
+  singleMessage dm =
+    let align = if ours dm then padLeft Max else padRight Max
+    in align $ padBottom (Pad 1) $ vBox
+      [ withAttr messageInfo $ align $ txt $ (if ours dm then "You" else userIdToText them) <> ", " <> (Text.pack . show $ decMessageTimestamp dm)
+      , withAttr messageText $ align $ txt $ decMessageBody dm
+      ]
+
+messageInfo :: AttrName
+messageInfo = attrName "message-info"
+
+messageText :: AttrName
+messageText = attrName "message-text"
 
 drawItem :: Bool -> UserId -> Widget Name
 drawItem isSelected name =
@@ -256,6 +270,45 @@ withUserData action = do
   case appState ^. userData of
     Nothing -> put $ appState & invalidEvent .~ Just UserDataMissing
     Just userData' -> action userData'
+
+decryptMessages :: UserData -> UserStore -> [GetMessagesResponse] -> ([String], [DecryptedMessage])
+decryptMessages ud us = partitionEithers . fmap (decryptMessage ud us)
+
+decryptMessage :: UserData -> UserStore -> GetMessagesResponse -> Either String DecryptedMessage
+decryptMessage (userData', userId) senderKeyStore gmr =
+  let verifiedEi = Crypto.verify (verificationKey senderKeyStore) (payload gmr) (messageSignature gmr)
+  in case verifiedEi of
+      Left _ -> Left "oops"
+      Right verified ->
+        if not verified
+          then Left "could not verify!"
+          else
+            let symmetricKey =
+                  maybe
+                    (error "oops")
+                    id
+                    $ Crypto.decryptSymmetricKey (decryptionKey userData') (encryptedSymmetricKey gmr)
+                associatedData =
+                  Crypto.AssociatedData
+                    (fromUser gmr)
+                    userId
+                    (messageId gmr)
+                    (messageTimestamp gmr)
+                result =
+                  Crypto.decryptMessage
+                    symmetricKey
+                    (nonce gmr)
+                    (authenticationTag gmr)
+                    (payload gmr)
+                    associatedData
+            in case result of
+              Left _ -> Left "oops!"
+              Right plaintextMessage ->
+                Right $
+                  DecryptedMessage 
+                    (messageTimestamp gmr)
+                    False
+                    (plaintextMessageToText plaintextMessage)
 
 handleEvent :: BrickEvent Name e -> EventM Name AppState ()
 handleEvent ev = do
@@ -335,9 +388,18 @@ handleEvent ev = do
                 -- this is a fatal error, it should never happen
                 halt
               Just uks -> do
-                -- try and decrypt messages
-                put $ appState
-                    & focusConversation .~ Just (FocusedUser selectedElement incoming outgoing uks)
+                withUserData $ \userData' -> do
+                  -- try and decrypt messages: this is where the real work happens
+                  let (_, decryptedMessages) = decryptMessages userData' uks incoming
+                  let ourMessages =
+                        fmap
+                          (\msg -> DecryptedMessage (outboundMessageTimestamp msg) True (outboundMessageBody msg))
+                          outgoing
+                  ts <- liftIO getCurrentTime
+                  let sampleDecMsg = DecryptedMessage ts True "This wasn't actually sent by us!"
+                  put $ appState
+                      & focusConversation
+                      .~ Just (selectedElement, sortOn decMessageTimestamp $ ourMessages <> decryptedMessages <> [sampleDecMsg])
       VtyEvent vtyEvent -> zoom listConversations $ handleListEvent vtyEvent
       _ -> put appState
 
@@ -422,7 +484,12 @@ theApp = App
   }
 
 theMap :: [(AttrName, Attr)]
-theMap = [(buttonSelectedAttr, bg yellow), (selectedAttr, white `on` blue)]
+theMap =
+  [ (buttonSelectedAttr, bg yellow)
+  , (selectedAttr, white `on` blue)
+  , (messageInfo, withStyle defAttr italic)
+  , (messageText, withStyle defAttr bold)
+  ]
 
 main :: IO ()
 main = do
