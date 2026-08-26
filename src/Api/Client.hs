@@ -12,7 +12,7 @@ module Api.Client
  )
 where
 
-import Api.GetEncryptionKey (GetEncryptionKey)
+import Api.GetEncryptionKey (GetEncryptionKey, GetUserKeysResponse)
 import Api.GetMessages (GetMessages, GetMessagesResponse)
 import Api.Register (Register, RegisterResponse, RegisterRequest)
 import Api.ServiceAvailable (ServiceAvailable)
@@ -26,7 +26,7 @@ import UserId (UserId)
 import Servant (NoContent)
 import Api.GetVerificationKey (GetVerificationKey)
 
-getEncryptionKey :: UUID -> UserId -> ClientM Crypto.EncryptionKey
+getEncryptionKey :: UUID -> UserId -> ClientM GetUserKeysResponse
 getEncryptionKey = client (Proxy @GetEncryptionKey)
 
 getVerificationKey :: UUID -> UserId -> ClientM Crypto.VerificationKey

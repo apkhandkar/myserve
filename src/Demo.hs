@@ -15,6 +15,7 @@ import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), ClientM, ClientError, runClientM)
 import Api.Client qualified as Client
 import Api.Register (RegisterResponse(..), RegisterRequest (RegisterRequest))
+import Api.GetEncryptionKey (GetUserKeysResponse(encryptionKey))
 import Api.SendMessage (SendMessageRequest(SendMessageRequest))
 import Data.Text (Text)
 import UserId qualified
@@ -83,7 +84,7 @@ sendMessage
 sendMessage (userState, userId) recipient message = do
   let recipientUserId = either (\e -> error $ "Not a valid user ID: " <> e) id $ UserId.mkUserId recipient
   -- get recipient's encryption key (RSA public key)
-  encryptionKey <-
+  userKeys <-
     errEither (runLocalhostClient $ Client.getEncryptionKey (authToken userState) recipientUserId) "Client error"
   -- generate AES symmetric key and nonce
   symmetricKey <- Crypto.generateSymmetricKey
@@ -108,7 +109,7 @@ sendMessage (userState, userId) recipient message = do
         maybe
           (error "Failed to encrypt symmetric key")
           pure
-          =<< Crypto.encryptSymmetricKey encryptionKey symmetricKey
+          =<< Crypto.encryptSymmetricKey (encryptionKey userKeys) symmetricKey
   -- sign message
   let signature = either (\err -> error $ "Failed to sign message: " <> show err) id $ Crypto.sign (signingKey userState) encryptedMessage
       request =
