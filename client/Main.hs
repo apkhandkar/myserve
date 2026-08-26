@@ -11,7 +11,7 @@ import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, Clie
 import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Api.Client (serviceAvailable, register, getMessages, getEncryptionKey, getVerificationKey)
 import System.Exit (exitFailure)
-import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, defaultMain, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom)
+import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent, AppEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom, modify, customMainWithDefaultVty)
 import Brick.Widgets.Edit (Editor, renderEditor, editorText, getEditContents, handleEditorEvent, applyEdit)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -21,7 +21,7 @@ import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
 import Data.Maybe (isNothing, isJust, fromMaybe)
-import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar), defAttr, Attr, yellow, white, blue, withStyle, italic, bold)
+import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown))
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Network.HTTP.Types (status412)
 import Data.ByteString.Char8 qualified as C8
@@ -39,6 +39,10 @@ import Data.Map qualified as Map
 import Crypto qualified
 import Data.Either (partitionEithers)
 import Crypto (PlaintextMessage(plaintextMessageToText))
+import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread)
+import Brick.BChan (newBChan, BChan, readBChan, writeBChan)
+import Control.Monad (forever)
+import Control.Exception (finally)
 
 data ClientConfig = ClientConfig
   { serverHost :: String
@@ -83,7 +87,25 @@ data Name = GetUserIdField | OkButton | ConversationsList
 
 data ErrorDialogButtons = Ok
 
+-- | Session state that is needed by workers to perform their tasks
+data SessionState = SessionState
+  { sessionUserId :: UserId
+  , registerResponse :: RegisterResponse
+  }
+
 type UserData = (RegisterResponse, UserId)
+
+
+data WorkerEvent = FetchMessagesResponse (Either String [GetMessagesResponse])
+
+data WorkerCommand = FetchMessages
+
+getMessagesWorker :: MonadIO m => SessionState -> ClientEnv -> m (Either String [GetMessagesResponse])
+getMessagesWorker sessionState' clientEnv' = do
+  responseEi <- liftIO $ runClientM (getMessages $ authToken $ registerResponse sessionState') clientEnv'
+  case responseEi of
+    Left _clientError -> pure $ Left "Failed to get messages"
+    Right resp -> pure $ Right resp
 
 data AppState = AppState
   { _clientEnv :: ClientEnv
@@ -98,6 +120,8 @@ data AppState = AppState
   , _newConversation :: Bool
   , _userStore :: Map.Map UserId UserStore
   , _invalidEvent :: Maybe InvalidEvent
+  , _sessionStateTVar :: TVar (Maybe SessionState)
+  , _workerCommandBChan :: BChan WorkerCommand
   }
 
 data InvalidEvent =
@@ -310,7 +334,28 @@ decryptMessage (userData', userId) senderKeyStore gmr =
                     False
                     (plaintextMessageToText plaintextMessage)
 
-handleEvent :: BrickEvent Name e -> EventM Name AppState ()
+refreshInbox :: [GetMessagesResponse] -> EventM Name AppState ()
+refreshInbox newMessages = do
+  withUserData $ \(registerResponse', _) -> do
+    -- We first fetch new messages that were addressed to us
+    clientEnv' <- gets (^. clientEnv)
+    -- Get the set of user names from the new messages
+    let senderIds = Set.fromList $ fmap fromUser newMessages
+    -- Get the existing set of user IDs from our user store
+    existingUserIds <- fmap Map.keysSet $ gets (^. userStore)
+    -- Compute the *new* user IDs that we need to add to our user store
+    let newUserIds = Set.difference senderIds existingUserIds
+        combinedUserIds = Set.union senderIds existingUserIds
+    -- Get user store data for new messages
+    -- Update user store...
+    (_, newUserStores) <- getUserStores clientEnv' (authToken registerResponse') (Set.toList newUserIds)
+    let newElemMap = Map.fromList newUserStores
+    modify $ \s -> s
+      & listConversations .~ conversationsList (Set.toList combinedUserIds)
+      & userStore %~ Map.union newElemMap
+      & userInbox %~ (newMessages <>)
+
+handleEvent :: BrickEvent Name WorkerEvent -> EventM Name AppState ()
 handleEvent ev = do
   appState <- get
   if unregistered appState
@@ -333,6 +378,10 @@ handleEvent ev = do
                       else put $ appState & userIdValidationError .~ Just ""
                   _ -> put $ appState & userIdValidationError .~ Just "Server error!"
               Right resp -> do
+                sessionStateTVar' <- gets (^. sessionStateTVar)
+                liftIO
+                  $ atomically
+                  $ writeTVar sessionStateTVar' (Just $ SessionState userId resp)
                 put $ appState
                     & popupTextInput %~ applyEdit clearZipper
                     & userData .~ Just (resp, userId)
@@ -348,29 +397,10 @@ handleEvent ev = do
   else if atHome appState
     then case ev of
       VtyEvent (EvKey (KChar 'r') []) -> do
-        withUserData $ \userData' -> do
-          -- We first fetch new messages that were addressed to us
-          responseEi <- liftIO $ runClientM (getMessages $ authToken $ fst userData') (appState ^. clientEnv)
-          newMessages <- case responseEi of
-              Left _ -> do
-                -- handle this later
-                error "Oops!"
-              Right resp -> pure resp
-          -- Get the set of user names from the new messages
-          let senderIds = Set.fromList $ fmap fromUser newMessages
-          -- Get the existing set of user IDs from our user store
-          existingUserIds <- fmap Map.keysSet $ gets _userStore
-          -- Compute the *new* user IDs that we need to add to our user store
-          let newUserIds = Set.difference senderIds existingUserIds
-              combinedUserIds = Set.union senderIds existingUserIds
-          -- Get user store data for new messages
-          -- Update user store...
-          (_, newUserStores) <- getUserStores (appState ^. clientEnv) (authToken $ fst userData') (Set.toList newUserIds)
-          let newElemMap = Map.fromList newUserStores
-          put $ appState
-              & listConversations .~ conversationsList (Set.toList combinedUserIds)
-              & userStore %~ Map.union newElemMap
-              & userInbox %~ (newMessages <>)
+        wcb <- gets (^. workerCommandBChan)
+        liftIO $ writeBChan wcb FetchMessages
+        put appState
+        --refreshInbox
       VtyEvent (EvKey (KChar 'n') []) -> do
         -- new conversation
         put $ appState & newConversation .~ True
@@ -401,6 +431,11 @@ handleEvent ev = do
                       & focusConversation
                       .~ Just (selectedElement, sortOn decMessageTimestamp $ ourMessages <> decryptedMessages <> [sampleDecMsg])
       VtyEvent vtyEvent -> zoom listConversations $ handleListEvent vtyEvent
+
+      AppEvent (FetchMessagesResponse resp) ->
+        case resp of
+          Left _ -> pure ()
+          Right gotMessages -> refreshInbox gotMessages
       _ -> put appState
 
   else if startNewConversation appState
@@ -416,8 +451,8 @@ handleEvent ev = do
           Right recipientUserId -> do
             case appState ^. userData of
               Nothing -> halt
-              Just (registerResponse, _) -> do
-                userStoreEi <- getUserStore (appState ^. clientEnv) (authToken registerResponse) recipientUserId
+              Just (registerResponse', _) -> do
+                userStoreEi <- getUserStore (appState ^. clientEnv) (authToken registerResponse') recipientUserId
                 case userStoreEi of
                   Right (_, us) -> do
                     let newMap = Map.insert recipientUserId us (appState ^. userStore)
@@ -474,7 +509,7 @@ getUserStore clientEnv' authToken' userId = do
       pure $ Right (userId, newUserStore)
     _ -> pure $ Left "Server did not like that user name!"
 
-theApp :: App AppState e Name
+theApp :: App AppState WorkerEvent Name
 theApp = App
   { appDraw = drawUi
   , appChooseCursor = showFirstCursor
@@ -503,6 +538,9 @@ main = do
       putStrLn "Could not connect to speakeasy-server instance!"
       exitFailure
     Right _ -> do
+      sessionStateTVar' <- newTVarIO Nothing
+      workerEventBChan <- newBChan 128
+      workerCommandBChan' <- newBChan 128
       let initState =
             AppState
               clientEnv'
@@ -517,5 +555,26 @@ main = do
               False
               Map.empty
               Nothing
-      _ <- defaultMain theApp initState
-      pure ()
+              sessionStateTVar'
+              workerCommandBChan'
+      workerId <- forkIO $ commandWorkerPool clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar'
+      (_, vty) <- customMainWithDefaultVty (Just workerEventBChan) theApp initState `finally` killThread workerId
+      shutdown vty
+
+commandWorkerPool
+  :: MonadIO m
+  => ClientEnv
+  -> BChan WorkerEvent
+  -> BChan WorkerCommand
+  -> TVar (Maybe SessionState)
+  -> m ()
+commandWorkerPool clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' = forever $ do
+  gotCommand <- liftIO $ readBChan workerCommandBChan'
+  case gotCommand of
+    FetchMessages -> do
+      gotSessionState <- liftIO $ readTVarIO sessionStateTVar'
+      case gotSessionState of
+        Nothing -> pure () -- Continue looping
+        Just sessionState -> do
+          workerResult <- getMessagesWorker sessionState clientEnv'
+          liftIO $ writeBChan workerEventBChan' (FetchMessagesResponse workerResult)

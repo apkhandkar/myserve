@@ -65,6 +65,7 @@ data RegisterRequest = RegisterRequest
 data RegisterResponse = RegisterResponse
   { decryptionKey :: Crypto.DecryptionKey
   , signingKey :: Crypto.SigningKey
+  , verificationKey :: Crypto.VerificationKey
   , authToken :: UUID
   }
   deriving (Generic, FromJSON, Show, ToJSON)
@@ -102,6 +103,7 @@ register (RegisterRequest{..}) = do
       pure $ RegisterResponse
         { decryptionKey = decryptionKey'
         , signingKey = signingKey'
+        , verificationKey = verificationKey'
         , authToken = token
         } 
     Just _ ->
