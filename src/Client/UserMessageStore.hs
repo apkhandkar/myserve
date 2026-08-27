@@ -12,12 +12,12 @@ where
 import Data.Map.Merge.Lazy qualified as Map
 import Data.Map qualified as Map
 import Crypto qualified
-import Data.Time (UTCTime)
+import Data.Time.LocalTime (LocalTime)
 import UserId (UserId)
 
 data DecryptedMessage = DecryptedMessage
   { messageBody :: Crypto.PlaintextMessage
-  , messageTimestamp :: UTCTime
+  , messageTimestamp :: LocalTime
   }
 
 data UserMessages = UserMessages

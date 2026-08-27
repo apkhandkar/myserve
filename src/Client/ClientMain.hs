@@ -21,7 +21,7 @@ import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
 import Data.Maybe (isNothing, isJust, fromMaybe)
-import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar, KDown, KUp, KHome, KEnd, KPageUp, KPageDown), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown), Modifier (MCtrl))
+import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar, KDown, KUp, KHome, KEnd, KPageUp, KPageDown), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown), Modifier (MCtrl), dim)
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Network.HTTP.Types (status412)
 import Data.ByteString.Char8 qualified as C8
@@ -29,7 +29,7 @@ import Lens.Micro ((^.), (.~), (&), (%~))
 import Data.ByteString qualified as BS
 import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelectedElement)
 import Data.Vector qualified as Vector
-import Data.Time (defaultTimeLocale, formatTime)
+import Data.Time (defaultTimeLocale, formatTime, getCurrentTimeZone, TimeZone)
 import Data.Text.Zipper (clearZipper)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
@@ -223,9 +223,9 @@ conversation (them, verTok, threadElems) msgInput =
  where
   singleMessage threadElem =
     let align = case threadElem of
-                  Thread.ThreadMessage (Thread.AttributedMessage True _ _) -> padLeft Max
-                  Thread.ThreadMessage (Thread.AttributedMessage False _ _) -> padRight Max
-                  Thread.DateSeparator _ -> hCenter
+                  Thread.IsOurMessage -> padLeft Max
+                  Thread.IsTheirMessage -> padRight Max
+                  Thread.IsDateLabel -> hCenter
     in align $ padBottom (Pad 1) $
       case threadElem of
         Thread.ThreadMessage am ->
@@ -238,9 +238,9 @@ conversation (them, verTok, threadElems) msgInput =
                 <> (Text.pack . formatTime defaultTimeLocale "%l:%M %P" $ Thread.messageTimestamp am)
           , withAttr messageText $ align $ txt $ Crypto.plaintextMessageToText $ Thread.messagePayload am
           ]
-        Thread.DateSeparator date ->
+        Thread.DateLabel date ->
           vBox [
-            withAttr messageInfo $ align $ txt $ Text.pack $ formatTime defaultTimeLocale "%e %B %Y" date
+            withAttr messageDate $ align $ txt $ Text.pack $ formatTime defaultTimeLocale "%e %B %Y" date
           ]
   userMessageInputBox = border $ renderEditor (str . Text.unpack . Text.unlines) True msgInput
 
@@ -249,6 +249,9 @@ messageInfo = attrName "message-info"
 
 messageText :: AttrName
 messageText = attrName "message-text"
+
+messageDate :: AttrName
+messageDate = attrName "message-date"
 
 drawItem :: Bool -> UserId -> Widget Name
 drawItem isSelected name =
@@ -433,6 +436,7 @@ theMap =
   , (selectedAttr, white `on` blue)
   , (messageInfo, withStyle defAttr italic)
   , (messageText, withStyle defAttr bold)
+  , (messageDate, withStyle defAttr dim)
   ]
 
 main :: IO ()
@@ -451,6 +455,7 @@ main = do
       userKeyStore <- newTVarIO $ UKS.emptyUserKeyStore
       workerEventBChan <- newBChan 128
       workerCommandBChan' <- newBChan 128
+      systemTimezone <- liftIO getCurrentTimeZone
       let initState =
             AppState
               clientEnv'
@@ -467,15 +472,20 @@ main = do
               False
 
       commandWorkerTid <-
-        forkIO $ commandWorker clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar' userKeyStore
+        forkIO $
+          commandWorker
+            clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar' userKeyStore systemTimezone
 
       pollingWorkerTid <-
-        forkIO $ pollingWorker clientEnv' workerEventBChan sessionStateTVar' userKeyStore
+        forkIO $
+          pollingWorker
+            clientEnv' workerEventBChan sessionStateTVar' userKeyStore systemTimezone
 
       (_, vty) <-
         customMainWithDefaultVty (Just workerEventBChan) theApp initState
           `finally` killThread commandWorkerTid
           `finally` killThread pollingWorkerTid
+
       shutdown vty
 
 sanitizeEditContents :: [Text] -> Text
@@ -491,20 +501,22 @@ commandWorker
   -> BChan Worker.WorkerCommand
   -> TVar (Maybe SS.SessionState)
   -> TVar (UKS.UserKeyStore)
+  -> TimeZone
   -> m ()
-commandWorker clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' userKeyStore = forever $ do
-  gotCommand <- liftIO $ readBChan workerCommandBChan'
-  maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
-  case maybeSessionState of
-    Nothing -> pure ()
-    Just sessionState ->
-      case gotCommand of
-        Worker.AddConversation newUser -> do
-          workerResult <- Worker.addConversationWorker sessionState userKeyStore clientEnv' newUser
-          liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
-        Worker.SendMessage recipient message -> do
-          workerResult <- Worker.sendMessageWorker sessionState userKeyStore clientEnv' recipient message
-          liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
+commandWorker clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' userKeyStore timezone =
+  forever $ do
+    gotCommand <- liftIO $ readBChan workerCommandBChan'
+    maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
+    case maybeSessionState of
+      Nothing -> pure ()
+      Just sessionState ->
+        case gotCommand of
+          Worker.AddConversation newUser -> do
+            workerResult <- Worker.addConversationWorker sessionState userKeyStore clientEnv' newUser
+            liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
+          Worker.SendMessage recipient message -> do
+            workerResult <- Worker.sendMessageWorker sessionState userKeyStore clientEnv' recipient message timezone
+            liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
 
 pollingWorker
   :: MonadIO m
@@ -512,13 +524,14 @@ pollingWorker
   -> BChan Worker.WorkerEvent
   -> TVar (Maybe SS.SessionState)
   -> TVar (UKS.UserKeyStore)
+  -> TimeZone
   -> m ()
-pollingWorker clientEnv' workerEventBChan' sessionStateTVar' userKeyStore = forever $ do
+pollingWorker clientEnv' workerEventBChan' sessionStateTVar' userKeyStore timezone = forever $ do
   maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
   case maybeSessionState of
     Nothing -> pure ()
     Just sessionState -> do
-      workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv'
+      workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv' timezone
       case workerResult of
         Nothing -> pure ()
         Just newMessages -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages newMessages)

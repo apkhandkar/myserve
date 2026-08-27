@@ -28,7 +28,8 @@ import Data.Either (fromRight)
 import qualified Api.GetMessages as GetMessage
 import UserId (UserId)
 import Data.Text (Text)
-import Data.Time (getCurrentTime)
+import Data.Time (getCurrentTime, TimeZone)
+import Data.Time.LocalTime (getCurrentTimeZone, utcToLocalTime)
 
 data WorkerCommand
   = AddConversation UserId
@@ -43,8 +44,9 @@ sendMessageWorker
   -> ClientEnv
   -> UserId
   -> Text
+  -> TimeZone
   -> m UMS.UserMessageStore
-sendMessageWorker sessionState userKeyStore clientEnv recipient message = do
+sendMessageWorker sessionState userKeyStore clientEnv recipient message timezone = do
   -- Check whether we already have user keys...
   keyStore <- liftIO $ readTVarIO userKeyStore
   userKeys <- case Map.lookup recipient keyStore of
@@ -95,7 +97,7 @@ sendMessageWorker sessionState userKeyStore clientEnv recipient message = do
             UMS.UserMessages
               verificationToken
               []
-              [UMS.DecryptedMessage (Crypto.PlaintextMessage message) messageTimestamp']
+              [UMS.DecryptedMessage (Crypto.PlaintextMessage message) (utcToLocalTime timezone messageTimestamp')]
       pure $ Map.fromList [(recipient, newMessageStore)]
 
 addConversationWorker
@@ -133,8 +135,9 @@ getMessagesWorker
   => SessionState
   -> TVar UKS.UserKeyStore
   -> ClientEnv
+  -> TimeZone
   -> m (Maybe UMS.UserMessageStore)
-getMessagesWorker sessionState userKeyStore clientEnv = do
+getMessagesWorker sessionState userKeyStore clientEnv timezone = do
   responseEi <- liftIO $ runClientM (getMessages $ SessionState.authToken sessionState) clientEnv
   case responseEi of
     Left _ -> error "Failed to get messages" -- TODO
@@ -196,7 +199,7 @@ getMessagesWorker sessionState userKeyStore clientEnv = do
                       associatedData
               case decryptionResult of
                 Left _ -> error "Failed to decrypt!"
-                Right decryptedMessage -> pure $ UMS.DecryptedMessage decryptedMessage (GetMessage.messageTimestamp message)
+                Right decryptedMessage -> pure $ UMS.DecryptedMessage decryptedMessage (utcToLocalTime timezone $ GetMessage.messageTimestamp message)
             pure $
               ( userId
               , UMS.UserMessages
