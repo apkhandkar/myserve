@@ -1,6 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
 module Client.ClientMain (main, ClientConfig(..), AppState(..)) where
@@ -10,7 +11,7 @@ import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, Clie
 import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Api.Client (serviceAvailable, register)
 import System.Exit (exitFailure)
-import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent, AppEvent), EventM, get, put, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom, customMainWithDefaultVty)
+import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent, AppEvent), EventM, get, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom, customMainWithDefaultVty, ViewportScroll (vScrollBy, vScrollToEnd, vScrollToBeginning, vScrollPage), viewportScroll, ViewportType (Vertical), viewport, Direction (Up, Down), modify)
 import Brick.Widgets.Edit (Editor, renderEditor, editorText, getEditContents, handleEditorEvent, applyEdit)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -20,7 +21,7 @@ import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
 import Data.Maybe (isNothing, isJust, fromMaybe)
-import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown))
+import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar, KDown, KUp, KHome, KEnd, KPageUp, KPageDown), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown), Modifier (MCtrl))
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Network.HTTP.Types (status412)
 import Data.ByteString.Char8 qualified as C8
@@ -30,7 +31,6 @@ import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelected
 import Data.Vector qualified as Vector
 import Data.Time (UTCTime)
 import Data.Text.Zipper (clearZipper)
-import Data.UUID (UUID)
 import Data.List (sortOn)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
@@ -38,12 +38,13 @@ import Crypto qualified
 import Crypto (PlaintextMessage(plaintextMessageToText))
 import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread, threadDelay)
 import Brick.BChan (newBChan, BChan, readBChan, writeBChan)
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Control.Exception (finally)
 import Client.UserKeyStore qualified as UKS
 import Client.UserMessageStore qualified as UMS
 import Client.SessionState qualified as SS
 import Client.Worker.GetMessages qualified as Worker
+import Control.Monad.Extra (whenJust)
 
 data ClientConfig = ClientConfig
   { serverHost :: String
@@ -83,7 +84,7 @@ baseUrl host port = BaseUrl
   , baseUrlPath = ""
   }
 
-data Name = GetUserIdField | OkButton | ConversationsList | EnterMessageField
+data Name = GetUserIdField | OkButton | ConversationsList | EnterMessageField | ConversationThreadViewport
   deriving (Show, Ord, Eq)
 
 data ErrorDialogButtons = Ok
@@ -97,29 +98,10 @@ data AppState = AppState
   , _listConversations :: List Name UserId
   , _focusConversation :: Maybe (UserId, Crypto.VerificationToken, [DecryptedMessage])
   , _newConversation :: Bool
-  , _userStore :: Map.Map UserId UserStore
-  , _invalidEvent :: Maybe InvalidEvent
   , _sessionStateTVar :: TVar (Maybe SS.SessionState)
   , _workerCommandBChan :: BChan Worker.WorkerCommand
   , _userMessageStore :: UMS.UserMessageStore
   , _loggedIn :: Bool
-  }
-
-data InvalidEvent =
-  UserDataMissing
- -- ^ We should have user data, but we couldn't find any
-
-data UserStore = UserStore
-  { encryptionKey :: Crypto.EncryptionKey
-  , verificationKey :: Crypto.VerificationKey
---  , verificationToken :: Crypto.VerificationToken
-  }
-
-data OutboundMessage = OutboundMessage
-  { toUser :: UserId
-  , outboundMessageTimestamp :: UTCTime
-  , outboundMessageId :: UUID
-  , outboundMessageBody :: Text
   }
 
 data DecryptedMessage = DecryptedMessage
@@ -165,6 +147,25 @@ invalidUserIdDialog d mS =
 
 unregistered :: AppState -> Bool
 unregistered appState = (not $ appState ^. loggedIn) && (isNothing $ _userIdValidationError appState)
+
+-- | Event handling to run when a conversation is not in focus
+handleUnfocused
+  :: (AppState -> Bool)
+  -> EventM Name AppState ()
+  -> EventM Name AppState ()
+handleUnfocused cond action = do
+  appState <- get
+  when (cond appState) action
+
+-- | Event handling to run when a focused conversation is expected
+handleFocused
+  :: (AppState -> Bool)
+  -> ((UserId, Crypto.VerificationToken, [DecryptedMessage]) -> EventM Name AppState ())
+  -> EventM Name AppState ()
+handleFocused cond action = do
+  appState <- get
+  when (cond appState) $ do
+    whenJust (appState ^. focusConversation) $ \conv -> action conv
 
 badUserIdAttempt :: AppState -> Bool
 badUserIdAttempt appState = (not $ appState ^. loggedIn) && (isJust $ _userIdValidationError appState)
@@ -230,6 +231,9 @@ conversationsScreen appState =
 selectConversationStandbyScreen :: Widget Name
 selectConversationStandbyScreen = border $ vCenter $ hCenter (str "Select a conversation")
 
+conversationThreadViewport :: ViewportScroll Name
+conversationThreadViewport = viewportScroll ConversationThreadViewport
+
 conversation
   :: (UserId, Crypto.VerificationToken, [DecryptedMessage])
   -> Editor Text Name
@@ -237,7 +241,10 @@ conversation
 conversation (them, verTok, decMsgs) msgInput =
   borderWithLabel
     (txt $ "Conversation with " <> userIdToText them <> " [" <> Crypto.verificationTokenToText verTok <> "]")
-    $ hBox [vBox [padRight Max $ vBox $ (singleMessage <$> decMsgs), userMessageInputBox]]
+    $ padBottom Max $ hBox [
+      vBox [viewport ConversationThreadViewport Vertical $ vBox $ (padRight Max . singleMessage <$> decMsgs)
+    , userMessageInputBox]
+    ]
  where
   singleMessage dm =
     let align = if ours dm then padLeft Max else padRight Max
@@ -269,14 +276,21 @@ errorDialog :: Dialog ErrorDialogButtons Name
 errorDialog = dialog (Just $ str "Error") (Just (OkButton, choices)) 50
   where choices = [ ("Okay", OkButton, Ok)]
 
+updateMessageStore :: UMS.UserMessageStore -> EventM Name AppState ()
+updateMessageStore newMessages = do
+  oldMessageStore <- gets (^. userMessageStore)
+  let updatedMessageStore = UMS.mergeNewMessages oldMessageStore newMessages
+      newUserIdList = Map.keys updatedMessageStore
+  modify $ \st -> st
+    & userMessageStore .~ updatedMessageStore -- update user message store
+    & listConversations .~ conversationsList newUserIdList -- update message list
+
 setFocusedConversation :: UserId -> EventM Name AppState ()
 setFocusedConversation focusedUser = do
   msgStore <- fmap (Map.lookup focusedUser) $ gets (^. userMessageStore)
   case msgStore of
     Nothing -> do
-      appState <- get
-      put $ appState
-          & focusConversation .~ Nothing -- handle properly later (shouldn't happen)
+      modify $ \st -> st & focusConversation .~ Nothing -- Shouldn't happen
     Just msgStore' -> do
       let decMsgs =
             let toSourcedMessage isOurs =
@@ -288,149 +302,138 @@ setFocusedConversation focusedUser = do
                   )
             in sortOn decMessageTimestamp $ fmap (toSourcedMessage False) (UMS.receivedMessages msgStore')
                 <> fmap (toSourcedMessage True) (UMS.sentMessages msgStore')
-      appState <- get
-      put $ appState
-          & focusConversation
-          .~ Just (focusedUser, UMS.verificationToken msgStore', decMsgs)
+      modify $ \st -> st
+        & focusConversation .~ Just (focusedUser, UMS.verificationToken msgStore', decMsgs)
+      -- Auto-scroll to end to reveal latest messages
+      vScrollToEnd conversationThreadViewport
+
+writeCommandChannel :: Worker.WorkerCommand -> EventM Name AppState ()
+writeCommandChannel command = do
+  commandChannel <- gets (^. workerCommandBChan)
+  liftIO $ writeBChan commandChannel command
 
 handleEvent :: BrickEvent Name Worker.WorkerEvent -> EventM Name AppState ()
 handleEvent ev = do
   appState <- get
+
+  -- Initial state
   if unregistered appState
     then case ev of
-      VtyEvent (EvKey KEnter []) -> do
-        let enteredText = Text.intercalate "\n" $ getEditContents (appState^.popupTextInput)
-        let userIdEi = mkUserId enteredText
-        case userIdEi of
-          Left err -> put $ appState & userIdValidationError .~ Just err
+      VtyEvent (EvKey KEnter []) ->
+        let enteredText = sanitizeEditContents $ getEditContents (appState^.popupTextInput)
+        in case mkUserId enteredText of
+          Left errMsg -> modify $ \st -> st & userIdValidationError .~ Just errMsg
           Right userId -> do
-            respEi <- liftIO $ runClientM (register (RegisterRequest userId)) (appState ^. clientEnv)
-            case respEi of
-              Left err -> do
-                case err of
-                  FailureResponse _ resp ->
-                    if responseStatusCode resp == status412
-                      then do
-                        let body = C8.unpack $ BS.toStrict $ responseBody resp
-                        put $ appState & userIdValidationError .~ Just body
-                      else put $ appState & userIdValidationError .~ Just ""
-                  _ -> put $ appState & userIdValidationError .~ Just "Server error!"
-              Right resp -> do
-                sessionStateTVar' <- gets (^. sessionStateTVar)
-                liftIO
-                  $ atomically
-                  $ writeTVar sessionStateTVar' (Just $ SS.mkSessionState userId resp)
-                put $ appState
+            liftIO (runClientM (register $ RegisterRequest userId) (appState ^. clientEnv))
+              >>= \case
+                Left err -> do
+                  case err of
+                    FailureResponse _ resp ->
+                      if responseStatusCode resp == status412
+                        then do
+                          let body = C8.unpack $ BS.toStrict $ responseBody resp
+                          modify $ \st -> st & userIdValidationError .~ Just body
+                        else halt -- Server error
+                    _ -> halt -- Connection or decoding error
+                Right registerResponse -> do
+                  sessionStateTVar' <- gets (^. sessionStateTVar)
+                  liftIO
+                    $ atomically
+                    $ writeTVar sessionStateTVar' (Just $ SS.mkSessionState userId registerResponse)
+                  modify $ \st -> st
                     & popupTextInput %~ applyEdit clearZipper
                     & loggedIn .~ True
-      VtyEvent (EvKey KEsc []) -> put appState
+      VtyEvent (EvKey KEsc []) -> halt
+      VtyEvent _ -> zoom popupTextInput $ handleEditorEvent ev
+      _ -> pure ()
 
-      _ -> zoom popupTextInput $ handleEditorEvent ev
+  -- User tries to register with an invalid or already taken user ID
   else if badUserIdAttempt appState
     then case ev of
-      VtyEvent (EvKey KEnter []) -> put $ appState & userIdValidationError .~ Nothing
+      VtyEvent (EvKey KEnter []) -> modify $ \st -> st & userIdValidationError .~ Nothing
       VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
       _ -> pure ()
 
+  -- Logged in, no conversation opened
   else if atHome appState
     then case ev of
-      VtyEvent (EvKey (KChar 'r') []) -> do
-        commandChannel <- gets (^. workerCommandBChan)
-        liftIO $ writeBChan commandChannel Worker.FetchMessages
-        pure ()
-      VtyEvent (EvKey (KChar 'n') []) -> do
-        -- new conversation
-        put $ appState & newConversation .~ True
+      VtyEvent (EvKey (KChar 'n') []) -> modify $ \st -> st & newConversation .~ True
+      -- 'q' or Esc: exit
       VtyEvent (EvKey (KChar 'q') []) -> halt
       VtyEvent (EvKey KEsc []) -> halt
+      -- Open selected conversation
       VtyEvent (EvKey KEnter []) ->
         case listSelectedElement (appState ^. listConversations) of
           Nothing -> pure () -- We have selected nothing, so do nothing
           Just (_, selectedUser) -> setFocusedConversation selectedUser
       VtyEvent vtyEvent -> zoom listConversations $ handleListEvent vtyEvent
-
-      -- Conversations screen, no conversation opened
-      -- We receive new messages
-      AppEvent (Worker.NewMessages newMessages) -> do
-        oldUms <- gets (^. userMessageStore)
-        let newUms = UMS.mergeNewMessages oldUms newMessages
-            newUserIdList = Map.keys newUms
-        put $ appState
-            & userMessageStore .~ newUms -- update user message store
-            & listConversations .~ conversationsList newUserIdList -- update message list
+      -- We have received new messages
+      AppEvent (Worker.NewMessages newMessages) -> updateMessageStore newMessages
       _ -> pure ()
 
   else if startNewConversation appState
     then case ev of
-      VtyEvent (EvKey KEnter []) -> do
-        let enteredText = Text.intercalate "\n" $ getEditContents (appState^.popupTextInput)
-        let userIdEi = mkUserId enteredText
-        case userIdEi of
+      VtyEvent (EvKey KEnter []) ->
+        let enteredText = sanitizeEditContents $ getEditContents (appState^.popupTextInput)
+        in case mkUserId enteredText of
           Left err -> do
-            put $ appState
-                & userIdValidationError .~ Just err
-                & newConversation .~ False
+            modify $ \st -> st
+              & userIdValidationError .~ Just err
+              & newConversation .~ False
           Right recipientUserId -> do
-            commandChannel <- gets (^. workerCommandBChan)
-            liftIO $ writeBChan commandChannel (Worker.AddConversation recipientUserId)
-            put $ appState
-                & popupTextInput %~ applyEdit clearZipper
-                & newConversation .~ False
+            writeCommandChannel $ Worker.AddConversation recipientUserId
+            modify $ \st -> st
+              & popupTextInput %~ applyEdit clearZipper
+              & newConversation .~ False
       VtyEvent (EvKey KEsc []) -> do
-        put $ appState
-            & popupTextInput %~ applyEdit clearZipper
-            & newConversation .~ False
+        modify $ \st -> st
+          & popupTextInput %~ applyEdit clearZipper
+          & newConversation .~ False
       _ -> zoom popupTextInput $ handleEditorEvent ev
 
   else if badRecipientAttempt appState
     then case ev of
       VtyEvent (EvKey KEnter []) ->
-        put $ appState
-            & userIdValidationError .~ Nothing
-            & newConversation .~ True
+        modify $ \st -> st
+          & userIdValidationError .~ Nothing
+          & newConversation .~ True
       VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
       _ -> pure ()
 
   -- A conversation is opened
   else if focusedConversation appState
-    then case ev of
-
-      -- 'Esc' key: exit conversation, return focus to conversations list
-      VtyEvent (EvKey KEsc []) ->
-        put $ appState
+    then whenJust (appState ^. focusConversation) $ \(focusedUser, _, _) ->
+      case ev of
+        -- 'Esc' key: exit conversation, return focus to conversations list
+        VtyEvent (EvKey KEsc []) ->
+          modify $ \st -> st
             & focusConversation .~ Nothing
             & messageInput %~ applyEdit clearZipper
-
-      -- 'Enter' key: send message
-      VtyEvent (EvKey KEnter []) -> do
-        nowFocused <- gets (^. focusConversation)
-        case nowFocused of
-          Nothing -> pure () -- shouldn't happen
-          Just (user, _, _) -> do
-            let enteredText = Text.intercalate "\n" $ getEditContents (appState ^. messageInput)
-            if enteredText == ""
-              then pure ()
-              else do
-                commandChannel <- gets (^. workerCommandBChan)
-                liftIO $ writeBChan commandChannel (Worker.SendMessage user enteredText)
-                put $ appState & messageInput %~ applyEdit clearZipper
-
-      -- All other keypresses: handle text input
-      VtyEvent _ -> zoom messageInput $ handleEditorEvent ev
-
-      -- We receive new messages
-      AppEvent (Worker.NewMessages newMessages) -> do
-        oldUms <- gets (^. userMessageStore)
-        let newUms = UMS.mergeNewMessages oldUms newMessages
-            newUserIdList = Map.keys newUms
-        put $ appState
-            & userMessageStore .~ newUms -- update user message store
-            & listConversations .~ conversationsList newUserIdList -- update message list
-        nowFocused <- gets (^. focusConversation)
-        case nowFocused of
-          Nothing -> pure () -- shouldn't happen
-          Just (user, _, _) -> setFocusedConversation user -- update focused conversation
-      _ -> pure ()
+        -- 'Enter' key: send message
+        VtyEvent (EvKey KEnter []) -> do
+          let enteredText = sanitizeEditContents $ getEditContents (appState ^. messageInput)
+          if enteredText == ""
+            then pure () -- empty message, nothing to do
+            else do
+              writeCommandChannel $ Worker.SendMessage focusedUser enteredText
+              modify $ \st -> st & messageInput %~ applyEdit clearZipper
+        -- Viewport scroll handling
+        -- Up/down arrow keys
+        VtyEvent (EvKey KDown [])-> vScrollBy conversationThreadViewport 1
+        VtyEvent (EvKey KUp []) -> vScrollBy conversationThreadViewport (-1)
+        -- Ctrl+Home/End: jump to beginning or end
+        VtyEvent (EvKey KHome [MCtrl]) -> vScrollToBeginning conversationThreadViewport
+        VtyEvent (EvKey KEnd [MCtrl]) -> vScrollToEnd conversationThreadViewport
+        -- PageUp/PageDn: scroll pages
+        VtyEvent (EvKey KPageUp []) -> vScrollPage conversationThreadViewport Up
+        VtyEvent (EvKey KPageDown []) -> vScrollPage conversationThreadViewport Down
+        -- All other keypresses: handle text input
+        VtyEvent _ -> zoom messageInput $ handleEditorEvent ev
+        -- We have received new messages
+        AppEvent (Worker.NewMessages newMessages) -> do
+          updateMessageStore newMessages
+          setFocusedConversation focusedUser
+        _ -> pure ()
 
   else pure ()
 
@@ -477,8 +480,6 @@ main = do
               (conversationsList [])
               Nothing
               False
-              Map.empty
-              Nothing
               sessionStateTVar'
               workerCommandBChan'
               UMS.emptyUserMessageStore
@@ -496,6 +497,12 @@ main = do
           `finally` killThread pollingWorkerTid
       shutdown vty
 
+sanitizeEditContents :: [Text] -> Text
+sanitizeEditContents = \case
+  [] -> ""
+  -- Ignore subsequent lines after the first
+  (line:_) -> Text.strip line
+
 commandWorker
   :: MonadIO m
   => ClientEnv
@@ -511,11 +518,6 @@ commandWorker clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar'
     Nothing -> pure ()
     Just sessionState ->
       case gotCommand of
-        Worker.FetchMessages -> do
-          workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv'
-          case workerResult of
-            Nothing -> pure ()
-            Just newMessages -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages newMessages)
         Worker.AddConversation newUser -> do
           workerResult <- Worker.addConversationWorker sessionState userKeyStore clientEnv' newUser
           liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)

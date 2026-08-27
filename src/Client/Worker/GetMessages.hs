@@ -31,12 +31,10 @@ import Data.Text (Text)
 import Data.Time (getCurrentTime)
 
 data WorkerCommand
-  = FetchMessages
-  | AddConversation UserId
+  = AddConversation UserId
   | SendMessage UserId Text
 
 data WorkerEvent = NewMessages UMS.UserMessageStore
-
 
 sendMessageWorker
   :: MonadIO m
