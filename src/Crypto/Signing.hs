@@ -2,6 +2,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -11,6 +12,7 @@ module Crypto.Signing
  , verify
  , generateVerificationToken
  , VerificationToken(..)
+ , verificationTokenToText
  )
 where
 
@@ -37,14 +39,11 @@ data SigningError =
 data VerificationToken = VerificationToken Text Text Text Text
 
 instance Show VerificationToken where
-  show (VerificationToken part0 part1 part2 part3) =
-    Text.unpack part0
-    <> "-"
-    <> Text.unpack part1
-    <> "-"
-    <> Text.unpack part2
-    <> "-"
-    <> Text.unpack part3
+  show = Text.unpack . verificationTokenToText
+
+verificationTokenToText :: VerificationToken -> Text
+verificationTokenToText (VerificationToken part0 part1 part2 part3) =
+  Text.intercalate "-" [part0, part1, part2, part3]
 
 -- | Generate an ED25519 key pair
 generateSigningKeyPair :: MonadRandom m => m (Types.VerificationKey, Types.SigningKey)

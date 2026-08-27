@@ -36,7 +36,7 @@ import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
 import Crypto qualified
 import Crypto (PlaintextMessage(plaintextMessageToText))
-import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread)
+import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread, threadDelay)
 import Brick.BChan (newBChan, BChan, readBChan, writeBChan)
 import Control.Monad (forever)
 import Control.Exception (finally)
@@ -83,29 +83,24 @@ baseUrl host port = BaseUrl
   , baseUrlPath = ""
   }
 
-data Name = GetUserIdField | OkButton | ConversationsList
+data Name = GetUserIdField | OkButton | ConversationsList | EnterMessageField
   deriving (Show, Ord, Eq)
 
 data ErrorDialogButtons = Ok
 
-
-data WorkerEvent = FetchMessagesResponse UMS.UserMessageStore
-
-data WorkerCommand = FetchMessages
-
-
 data AppState = AppState
   { _clientEnv :: ClientEnv
   , _popupTextInput :: Editor Text Name
+  , _messageInput :: Editor Text Name
   , _dialogError :: Dialog ErrorDialogButtons Name
   , _userIdValidationError :: Maybe String
   , _listConversations :: List Name UserId
-  , _focusConversation :: Maybe (UserId, [DecryptedMessage])
+  , _focusConversation :: Maybe (UserId, Crypto.VerificationToken, [DecryptedMessage])
   , _newConversation :: Bool
   , _userStore :: Map.Map UserId UserStore
   , _invalidEvent :: Maybe InvalidEvent
   , _sessionStateTVar :: TVar (Maybe SS.SessionState)
-  , _workerCommandBChan :: BChan WorkerCommand
+  , _workerCommandBChan :: BChan Worker.WorkerCommand
   , _userMessageStore :: UMS.UserMessageStore
   , _loggedIn :: Bool
   }
@@ -137,6 +132,9 @@ makeLenses ''AppState
 
 editorGetUserId :: Editor Text Name
 editorGetUserId = editorText GetUserIdField (Just 1) ""
+
+editorMessage :: Editor Text Name
+editorMessage = editorText EnterMessageField (Just 1) ""
 
 userIdWelcomePrompt :: Editor Text Name -> Widget Name
 userIdWelcomePrompt ed =
@@ -219,7 +217,7 @@ conversationsScreen appState =
         borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
     , case appState ^. focusConversation of
         Nothing -> selectConversationStandbyScreen
-        Just focused -> conversation focused
+        Just focused -> conversation focused (appState ^. messageInput)
     ]
     , padLeft (Pad 1) $ padRight (Pad 1) $ hBox [
         padRight Max $ str "Logged in as wooblyfloof"
@@ -232,8 +230,14 @@ conversationsScreen appState =
 selectConversationStandbyScreen :: Widget Name
 selectConversationStandbyScreen = border $ vCenter $ hCenter (str "Select a conversation")
 
-conversation :: (UserId, [DecryptedMessage]) -> Widget Name
-conversation (them, decMsgs) = border $ padRight Max $ vBox $ singleMessage <$> decMsgs
+conversation
+  :: (UserId, Crypto.VerificationToken, [DecryptedMessage])
+  -> Editor Text Name
+  -> Widget Name
+conversation (them, verTok, decMsgs) msgInput =
+  borderWithLabel
+    (txt $ "Conversation with " <> userIdToText them <> " [" <> Crypto.verificationTokenToText verTok <> "]")
+    $ hBox [vBox [padRight Max $ vBox $ (singleMessage <$> decMsgs), userMessageInputBox]]
  where
   singleMessage dm =
     let align = if ours dm then padLeft Max else padRight Max
@@ -241,6 +245,7 @@ conversation (them, decMsgs) = border $ padRight Max $ vBox $ singleMessage <$> 
       [ withAttr messageInfo $ align $ txt $ (if ours dm then "You" else userIdToText them) <> ", " <> (Text.pack . show $ decMessageTimestamp dm)
       , withAttr messageText $ align $ txt $ decMessageBody dm
       ]
+  userMessageInputBox = border $ renderEditor (str . Text.unpack . Text.unlines) True msgInput
 
 messageInfo :: AttrName
 messageInfo = attrName "message-info"
@@ -264,8 +269,31 @@ errorDialog :: Dialog ErrorDialogButtons Name
 errorDialog = dialog (Just $ str "Error") (Just (OkButton, choices)) 50
   where choices = [ ("Okay", OkButton, Ok)]
 
+setFocusedConversation :: UserId -> EventM Name AppState ()
+setFocusedConversation focusedUser = do
+  msgStore <- fmap (Map.lookup focusedUser) $ gets (^. userMessageStore)
+  case msgStore of
+    Nothing -> do
+      appState <- get
+      put $ appState
+          & focusConversation .~ Nothing -- handle properly later (shouldn't happen)
+    Just msgStore' -> do
+      let decMsgs =
+            let toSourcedMessage isOurs =
+                  ( \msg ->
+                      DecryptedMessage
+                        (UMS.messageTimestamp msg)
+                        isOurs
+                        (plaintextMessageToText $ UMS.messageBody msg)
+                  )
+            in sortOn decMessageTimestamp $ fmap (toSourcedMessage False) (UMS.receivedMessages msgStore')
+                <> fmap (toSourcedMessage True) (UMS.sentMessages msgStore')
+      appState <- get
+      put $ appState
+          & focusConversation
+          .~ Just (focusedUser, UMS.verificationToken msgStore', decMsgs)
 
-handleEvent :: BrickEvent Name WorkerEvent -> EventM Name AppState ()
+handleEvent :: BrickEvent Name Worker.WorkerEvent -> EventM Name AppState ()
 handleEvent ev = do
   appState <- get
   if unregistered appState
@@ -307,10 +335,9 @@ handleEvent ev = do
   else if atHome appState
     then case ev of
       VtyEvent (EvKey (KChar 'r') []) -> do
-        wcb <- gets (^. workerCommandBChan)
-        liftIO $ writeBChan wcb FetchMessages
-        put appState
-        --refreshInbox
+        commandChannel <- gets (^. workerCommandBChan)
+        liftIO $ writeBChan commandChannel Worker.FetchMessages
+        pure ()
       VtyEvent (EvKey (KChar 'n') []) -> do
         -- new conversation
         put $ appState & newConversation .~ True
@@ -319,41 +346,23 @@ handleEvent ev = do
       VtyEvent (EvKey KEnter []) ->
         case listSelectedElement (appState ^. listConversations) of
           Nothing -> pure () -- We have selected nothing, so do nothing
-          Just (_, selectedElement) -> do
-            msgStore <- fmap (Map.lookup selectedElement) $ gets (^. userMessageStore)
-
-            let decMsgs =
-                  case msgStore of
-                    Nothing -> []
-                    Just msgStore' ->
-                      let toSourcedMessage isOurs =
-                            ( \msg ->
-                                DecryptedMessage
-                                  (UMS.messageTimestamp msg)
-                                  isOurs
-                                  (plaintextMessageToText $ UMS.messageBody msg)
-                            )
-                      in sortOn decMessageTimestamp $ fmap (toSourcedMessage False) (UMS.receivedMessages msgStore')
-                          <> fmap (toSourcedMessage True) (UMS.sentMessages msgStore')
-
-            put $ appState
-                & focusConversation
-                .~ Just (selectedElement, decMsgs)
+          Just (_, selectedUser) -> setFocusedConversation selectedUser
       VtyEvent vtyEvent -> zoom listConversations $ handleListEvent vtyEvent
 
-      AppEvent (FetchMessagesResponse newMessages) -> do
+      -- Conversations screen, no conversation opened
+      -- We receive new messages
+      AppEvent (Worker.NewMessages newMessages) -> do
         oldUms <- gets (^. userMessageStore)
         let newUms = UMS.mergeNewMessages oldUms newMessages
             newUserIdList = Map.keys newUms
         put $ appState
-            & userMessageStore .~ newUms
-            & listConversations .~ conversationsList newUserIdList
-      _ -> put appState
+            & userMessageStore .~ newUms -- update user message store
+            & listConversations .~ conversationsList newUserIdList -- update message list
+      _ -> pure ()
 
   else if startNewConversation appState
     then case ev of
-      VtyEvent (EvKey KEnter []) -> pure ()
-        {- do
+      VtyEvent (EvKey KEnter []) -> do
         let enteredText = Text.intercalate "\n" $ getEditContents (appState^.popupTextInput)
         let userIdEi = mkUserId enteredText
         case userIdEi of
@@ -362,22 +371,11 @@ handleEvent ev = do
                 & userIdValidationError .~ Just err
                 & newConversation .~ False
           Right recipientUserId -> do
-            case appState ^. userData of
-              Nothing -> halt
-              Just (registerResponse', _) -> do
-                userStoreEi <- getUserStore (appState ^. clientEnv) (authToken registerResponse') recipientUserId
-                case userStoreEi of
-                  Right (_, us) -> do
-                    let newMap = Map.insert recipientUserId us (appState ^. userStore)
-                    put $ appState
-                        & popupTextInput %~ applyEdit clearZipper
-                        & newConversation .~ False
-                        & userStore .~ newMap
-                        & listConversations .~ conversationsList (Map.keys newMap)
-                  Left err ->
-                    put $ appState
-                        & userIdValidationError .~ Just err
-                        & newConversation .~ False -}
+            commandChannel <- gets (^. workerCommandBChan)
+            liftIO $ writeBChan commandChannel (Worker.AddConversation recipientUserId)
+            put $ appState
+                & popupTextInput %~ applyEdit clearZipper
+                & newConversation .~ False
       VtyEvent (EvKey KEsc []) -> do
         put $ appState
             & popupTextInput %~ applyEdit clearZipper
@@ -393,13 +391,50 @@ handleEvent ev = do
       VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
       _ -> pure ()
 
+  -- A conversation is opened
   else if focusedConversation appState
     then case ev of
-      VtyEvent (EvKey KEsc []) -> put $ appState & focusConversation .~ Nothing
-      _ -> put appState
+
+      -- 'Esc' key: exit conversation, return focus to conversations list
+      VtyEvent (EvKey KEsc []) ->
+        put $ appState
+            & focusConversation .~ Nothing
+            & messageInput %~ applyEdit clearZipper
+
+      -- 'Enter' key: send message
+      VtyEvent (EvKey KEnter []) -> do
+        nowFocused <- gets (^. focusConversation)
+        case nowFocused of
+          Nothing -> pure () -- shouldn't happen
+          Just (user, _, _) -> do
+            let enteredText = Text.intercalate "\n" $ getEditContents (appState ^. messageInput)
+            if enteredText == ""
+              then pure ()
+              else do
+                commandChannel <- gets (^. workerCommandBChan)
+                liftIO $ writeBChan commandChannel (Worker.SendMessage user enteredText)
+                put $ appState & messageInput %~ applyEdit clearZipper
+
+      -- All other keypresses: handle text input
+      VtyEvent _ -> zoom messageInput $ handleEditorEvent ev
+
+      -- We receive new messages
+      AppEvent (Worker.NewMessages newMessages) -> do
+        oldUms <- gets (^. userMessageStore)
+        let newUms = UMS.mergeNewMessages oldUms newMessages
+            newUserIdList = Map.keys newUms
+        put $ appState
+            & userMessageStore .~ newUms -- update user message store
+            & listConversations .~ conversationsList newUserIdList -- update message list
+        nowFocused <- gets (^. focusConversation)
+        case nowFocused of
+          Nothing -> pure () -- shouldn't happen
+          Just (user, _, _) -> setFocusedConversation user -- update focused conversation
+      _ -> pure ()
+
   else pure ()
 
-theApp :: App AppState WorkerEvent Name
+theApp :: App AppState Worker.WorkerEvent Name
 theApp = App
   { appDraw = drawUi
   , appChooseCursor = showFirstCursor
@@ -436,6 +471,7 @@ main = do
             AppState
               clientEnv'
               editorGetUserId
+              editorMessage
               errorDialog
               Nothing
               (conversationsList [])
@@ -447,52 +483,60 @@ main = do
               workerCommandBChan'
               UMS.emptyUserMessageStore
               False
-      workerId <-
-        forkIO $ commandWorkerPool clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar' userKeyStore
-      (_, vty) <- customMainWithDefaultVty (Just workerEventBChan) theApp initState `finally` killThread workerId
+
+      commandWorkerTid <-
+        forkIO $ commandWorker clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar' userKeyStore
+
+      pollingWorkerTid <-
+        forkIO $ pollingWorker clientEnv' workerEventBChan sessionStateTVar' userKeyStore
+
+      (_, vty) <-
+        customMainWithDefaultVty (Just workerEventBChan) theApp initState
+          `finally` killThread commandWorkerTid
+          `finally` killThread pollingWorkerTid
       shutdown vty
 
--- download messages
--- decrypt messages
--- verify identity
-
--- user message store
--- userID: (in, out, verificationToken)
-
--- user key store
--- uesrID: encryption key (pubKey), verification key
-
-
-type UserMessageStore = Map.Map UserId UserMessages
-
-data UserMessages = UserMessages
-  { inboundMessages :: [PlainMessage]
-  , outboundMessages :: [PlainMessage]
-  , verificationToken :: Crypto.VerificationToken
-  }
-
-data PlainMessage = PlainMessage
-  { plainMessageTimestamp :: UTCTime
-  , plainMessageBody :: Text
-  }
-
-commandWorkerPool
+commandWorker
   :: MonadIO m
   => ClientEnv
-  -> BChan WorkerEvent
-  -> BChan WorkerCommand
+  -> BChan Worker.WorkerEvent
+  -> BChan Worker.WorkerCommand
   -> TVar (Maybe SS.SessionState)
   -> TVar (UKS.UserKeyStore)
   -> m ()
-commandWorkerPool clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' userKeyStore = forever $ do
+commandWorker clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' userKeyStore = forever $ do
   gotCommand <- liftIO $ readBChan workerCommandBChan'
-  case gotCommand of
-    FetchMessages -> do
-      gotSessionState <- liftIO $ readTVarIO sessionStateTVar'
-      case gotSessionState of
-        Nothing -> pure () -- Continue looping
-        Just sessionState -> do
+  maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
+  case maybeSessionState of
+    Nothing -> pure ()
+    Just sessionState ->
+      case gotCommand of
+        Worker.FetchMessages -> do
           workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv'
           case workerResult of
             Nothing -> pure ()
-            Just newMessages -> liftIO $ writeBChan workerEventBChan' (FetchMessagesResponse newMessages)
+            Just newMessages -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages newMessages)
+        Worker.AddConversation newUser -> do
+          workerResult <- Worker.addConversationWorker sessionState userKeyStore clientEnv' newUser
+          liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
+        Worker.SendMessage recipient message -> do
+          workerResult <- Worker.sendMessageWorker sessionState userKeyStore clientEnv' recipient message
+          liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
+
+pollingWorker
+  :: MonadIO m
+  => ClientEnv
+  -> BChan Worker.WorkerEvent
+  -> TVar (Maybe SS.SessionState)
+  -> TVar (UKS.UserKeyStore)
+  -> m ()
+pollingWorker clientEnv' workerEventBChan' sessionStateTVar' userKeyStore = forever $ do
+  maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
+  case maybeSessionState of
+    Nothing -> pure ()
+    Just sessionState -> do
+      workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv'
+      case workerResult of
+        Nothing -> pure ()
+        Just newMessages -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages newMessages)
+  liftIO $ threadDelay 2000000 -- 2 second sleep
