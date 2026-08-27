@@ -29,22 +29,22 @@ import Lens.Micro ((^.), (.~), (&), (%~))
 import Data.ByteString qualified as BS
 import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelectedElement)
 import Data.Vector qualified as Vector
-import Data.Time (UTCTime)
+import Data.Time (defaultTimeLocale, formatTime)
 import Data.Text.Zipper (clearZipper)
-import Data.List (sortOn)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
 import Crypto qualified
 import Crypto (PlaintextMessage(plaintextMessageToText))
 import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread, threadDelay)
 import Brick.BChan (newBChan, BChan, readBChan, writeBChan)
-import Control.Monad (forever, when)
+import Control.Monad (forever)
 import Control.Exception (finally)
 import Client.UserKeyStore qualified as UKS
 import Client.UserMessageStore qualified as UMS
 import Client.SessionState qualified as SS
 import Client.Worker.GetMessages qualified as Worker
 import Control.Monad.Extra (whenJust)
+import Client.MessageThread qualified as Thread
 
 data ClientConfig = ClientConfig
   { serverHost :: String
@@ -96,18 +96,12 @@ data AppState = AppState
   , _dialogError :: Dialog ErrorDialogButtons Name
   , _userIdValidationError :: Maybe String
   , _listConversations :: List Name UserId
-  , _focusConversation :: Maybe (UserId, Crypto.VerificationToken, [DecryptedMessage])
+  , _focusConversation :: Maybe (UserId, Crypto.VerificationToken, [Thread.ThreadElement])
   , _newConversation :: Bool
   , _sessionStateTVar :: TVar (Maybe SS.SessionState)
   , _workerCommandBChan :: BChan Worker.WorkerCommand
   , _userMessageStore :: UMS.UserMessageStore
   , _loggedIn :: Bool
-  }
-
-data DecryptedMessage = DecryptedMessage
-  { decMessageTimestamp :: UTCTime
-  , ours :: Bool
-  , decMessageBody :: Text
   }
 
 makeLenses ''AppState
@@ -147,25 +141,6 @@ invalidUserIdDialog d mS =
 
 unregistered :: AppState -> Bool
 unregistered appState = (not $ appState ^. loggedIn) && (isNothing $ _userIdValidationError appState)
-
--- | Event handling to run when a conversation is not in focus
-handleUnfocused
-  :: (AppState -> Bool)
-  -> EventM Name AppState ()
-  -> EventM Name AppState ()
-handleUnfocused cond action = do
-  appState <- get
-  when (cond appState) action
-
--- | Event handling to run when a focused conversation is expected
-handleFocused
-  :: (AppState -> Bool)
-  -> ((UserId, Crypto.VerificationToken, [DecryptedMessage]) -> EventM Name AppState ())
-  -> EventM Name AppState ()
-handleFocused cond action = do
-  appState <- get
-  when (cond appState) $ do
-    whenJust (appState ^. focusConversation) $ \conv -> action conv
 
 badUserIdAttempt :: AppState -> Bool
 badUserIdAttempt appState = (not $ appState ^. loggedIn) && (isJust $ _userIdValidationError appState)
@@ -235,23 +210,38 @@ conversationThreadViewport :: ViewportScroll Name
 conversationThreadViewport = viewportScroll ConversationThreadViewport
 
 conversation
-  :: (UserId, Crypto.VerificationToken, [DecryptedMessage])
+  :: (UserId, Crypto.VerificationToken, [Thread.ThreadElement])
   -> Editor Text Name
   -> Widget Name
-conversation (them, verTok, decMsgs) msgInput =
+conversation (them, verTok, threadElems) msgInput =
   borderWithLabel
     (txt $ "Conversation with " <> userIdToText them <> " [" <> Crypto.verificationTokenToText verTok <> "]")
     $ padBottom Max $ hBox [
-      vBox [viewport ConversationThreadViewport Vertical $ vBox $ (padRight Max . singleMessage <$> decMsgs)
+      vBox [viewport ConversationThreadViewport Vertical $ vBox $ (padRight Max . singleMessage <$> threadElems)
     , userMessageInputBox]
     ]
  where
-  singleMessage dm =
-    let align = if ours dm then padLeft Max else padRight Max
-    in align $ padBottom (Pad 1) $ vBox
-      [ withAttr messageInfo $ align $ txt $ (if ours dm then "You" else userIdToText them) <> ", " <> (Text.pack . show $ decMessageTimestamp dm)
-      , withAttr messageText $ align $ txt $ decMessageBody dm
-      ]
+  singleMessage threadElem =
+    let align = case threadElem of
+                  Thread.ThreadMessage (Thread.AttributedMessage True _ _) -> padLeft Max
+                  Thread.ThreadMessage (Thread.AttributedMessage False _ _) -> padRight Max
+                  Thread.DateSeparator _ -> hCenter
+    in align $ padBottom (Pad 1) $
+      case threadElem of
+        Thread.ThreadMessage am ->
+          vBox [
+            withAttr messageInfo
+              $ align
+              $ txt
+              $ (if Thread.ours am then "You" else userIdToText them)
+                <> ", "
+                <> (Text.pack . formatTime defaultTimeLocale "%l:%M %P" $ Thread.messageTimestamp am)
+          , withAttr messageText $ align $ txt $ Crypto.plaintextMessageToText $ Thread.messagePayload am
+          ]
+        Thread.DateSeparator date ->
+          vBox [
+            withAttr messageInfo $ align $ txt $ Text.pack $ formatTime defaultTimeLocale "%e %B %Y" date
+          ]
   userMessageInputBox = border $ renderEditor (str . Text.unpack . Text.unlines) True msgInput
 
 messageInfo :: AttrName
@@ -292,18 +282,9 @@ setFocusedConversation focusedUser = do
     Nothing -> do
       modify $ \st -> st & focusConversation .~ Nothing -- Shouldn't happen
     Just msgStore' -> do
-      let decMsgs =
-            let toSourcedMessage isOurs =
-                  ( \msg ->
-                      DecryptedMessage
-                        (UMS.messageTimestamp msg)
-                        isOurs
-                        (plaintextMessageToText $ UMS.messageBody msg)
-                  )
-            in sortOn decMessageTimestamp $ fmap (toSourcedMessage False) (UMS.receivedMessages msgStore')
-                <> fmap (toSourcedMessage True) (UMS.sentMessages msgStore')
+      let messageThread = Thread.userMessagesToThread msgStore'
       modify $ \st -> st
-        & focusConversation .~ Just (focusedUser, UMS.verificationToken msgStore', decMsgs)
+        & focusConversation .~ Just (focusedUser, UMS.verificationToken msgStore', messageThread)
       -- Auto-scroll to end to reveal latest messages
       vScrollToEnd conversationThreadViewport
 
