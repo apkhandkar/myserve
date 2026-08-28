@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Client.UserMessageStore
   ( UserMessages(..)
@@ -6,6 +7,7 @@ module Client.UserMessageStore
   , UserMessageStore
   , mergeNewMessages
   , emptyUserMessageStore
+  , addUser
   )
 where
 
@@ -30,6 +32,16 @@ type UserMessageStore = Map.Map UserId UserMessages
 
 emptyUserMessageStore :: UserMessageStore
 emptyUserMessageStore = Map.empty
+
+addUser :: UserId -> Crypto.VerificationToken -> UserMessageStore -> UserMessageStore
+addUser newUserId verificationToken userMessageStore =
+  let newUserMessages =
+        UserMessages
+          { receivedMessages = []
+          , sentMessages = []
+          , ..
+          }
+  in Map.insert newUserId newUserMessages userMessageStore
 
 mergeNewMessages
   :: UserMessageStore

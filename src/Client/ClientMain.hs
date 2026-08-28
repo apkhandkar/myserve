@@ -20,7 +20,7 @@ import Api.Register (RegisterRequest (RegisterRequest))
 import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
-import Data.Maybe (isNothing, isJust, fromMaybe)
+import Data.Maybe (isNothing, isJust)
 import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar, KDown, KUp, KHome, KEnd, KPageUp, KPageDown), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown), Modifier (MCtrl), dim)
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Network.HTTP.Types (status412)
@@ -29,13 +29,13 @@ import Lens.Micro ((^.), (.~), (&), (%~))
 import Data.ByteString qualified as BS
 import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelectedElement)
 import Data.Vector qualified as Vector
-import Data.Time (defaultTimeLocale, formatTime, getCurrentTimeZone, TimeZone)
+import Data.Time (defaultTimeLocale, formatTime, getCurrentTimeZone )
 import Data.Text.Zipper (clearZipper)
 import UserId (UserId (userIdToText), mkUserId)
 import Data.Map qualified as Map
 import Crypto qualified
 import Crypto (PlaintextMessage(plaintextMessageToText))
-import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, readTVarIO, killThread, threadDelay)
+import GHC.Conc (TVar, newTVarIO, atomically, writeTVar, forkIO, killThread, threadDelay)
 import Brick.BChan (newBChan, BChan, readBChan, writeBChan)
 import Control.Monad (forever)
 import Control.Exception (finally)
@@ -93,8 +93,8 @@ data AppState = AppState
   { _clientEnv :: ClientEnv
   , _popupTextInput :: Editor Text Name
   , _messageInput :: Editor Text Name
-  , _dialogError :: Dialog ErrorDialogButtons Name
-  , _userIdValidationError :: Maybe String
+  , _errorDialog :: Dialog ErrorDialogButtons Name
+  , _errorDialogMessage :: Maybe String
   , _listConversations :: List Name UserId
   , _focusConversation :: Maybe (UserId, Crypto.VerificationToken, [Thread.ThreadElement])
   , _newConversation :: Bool
@@ -135,73 +135,80 @@ recipientPrompt ed =
             ed )
     )
 
-invalidUserIdDialog :: Dialog ErrorDialogButtons Name -> Maybe String -> Widget Name
-invalidUserIdDialog d mS =
-  renderDialog d $ hCenter $ padAll 1 $ strWrap (fromMaybe "Invalid user ID entered!" mS)
-
 unregistered :: AppState -> Bool
-unregistered appState = (not $ appState ^. loggedIn) && (isNothing $ _userIdValidationError appState)
+unregistered appState = (not $ appState ^. loggedIn) && (isNothing $ _errorDialogMessage appState)
 
 badUserIdAttempt :: AppState -> Bool
-badUserIdAttempt appState = (not $ appState ^. loggedIn) && (isJust $ _userIdValidationError appState)
+badUserIdAttempt appState = (not $ appState ^. loggedIn) && (isJust $ _errorDialogMessage appState)
 
 badRecipientAttempt :: AppState -> Bool
-badRecipientAttempt appState = (appState ^. loggedIn) && (isJust $ _userIdValidationError appState)
+badRecipientAttempt appState = (appState ^. loggedIn) && (isJust $ _errorDialogMessage appState)
 
 startNewConversation :: AppState -> Bool
-startNewConversation appState = appState ^. newConversation
+startNewConversation appState =
+  appState ^. newConversation
+  && isNothing (_errorDialogMessage appState)
 
 focusedConversation :: AppState -> Bool
 focusedConversation appState =
   appState ^. loggedIn
-  && isNothing (appState ^. userIdValidationError)
+  && isNothing (appState ^. errorDialogMessage)
   && not (appState ^. newConversation)
   && isJust (appState ^. focusConversation)
 
 atHome :: AppState -> Bool
 atHome appState =
   appState ^. loggedIn
-  && isNothing (appState ^. userIdValidationError)
+  && isNothing (appState ^. errorDialogMessage)
   && not (appState ^. newConversation)
   && isNothing (appState ^. focusConversation)
 
-drawUi :: AppState -> [Widget Name]
-drawUi appState
-  | unregistered appState =
-      [userIdWelcomePrompt $ appState ^. popupTextInput]
-  | badUserIdAttempt appState =
-      [ invalidUserIdDialog (appState ^. dialogError) (appState ^. userIdValidationError)
-      , userIdWelcomePrompt $ appState ^. popupTextInput
-      ]
-  | atHome appState || focusedConversation appState = [conversationsScreen appState]
-  | startNewConversation appState =
-      [ recipientPrompt $ appState ^. popupTextInput
-      , conversationsScreen appState
-      ]
-  | badRecipientAttempt appState =
-      [ invalidUserIdDialog (appState ^. dialogError) (appState ^. userIdValidationError)
-      , recipientPrompt $ appState ^. popupTextInput
-      , conversationsScreen appState
-      ]
-  | otherwise = []
+renderer :: AppState -> [Widget Name]
+renderer appState =
+  errorDialogLayer appState
+  <> loginPromptLayer appState
+  <> newConversationPromptLayer appState
+  <> homeScreenLayer appState
 
-conversationsScreen :: AppState -> Widget Name
-conversationsScreen appState =
-  vBox
-    [ hBox [
-      hLimit 50 $
-        borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
-    , case appState ^. focusConversation of
-        Nothing -> selectConversationStandbyScreen
-        Just focused -> conversation focused (appState ^. messageInput)
-    ]
-    , padLeft (Pad 1) $ padRight (Pad 1) $ hBox [
-        padRight Max $ str "Logged in as wooblyfloof"
-      , padLeft Max $ str $ case appState ^. focusConversation of
-          Nothing -> "(n) New conversation (r) Refresh (h) Help (q) Quit"
-          Just _ -> "(Esc) Return to main menu"
+loginPromptLayer :: AppState -> [Widget Name]
+loginPromptLayer appState =
+  if not (appState ^. loggedIn)
+  then [userIdWelcomePrompt $ appState ^. popupTextInput]
+  else []
+
+newConversationPromptLayer :: AppState -> [Widget Name]
+newConversationPromptLayer appState =
+  if appState ^. newConversation
+    then [recipientPrompt $ appState ^. popupTextInput]
+    else []
+
+errorDialogLayer :: AppState -> [Widget Name]
+errorDialogLayer appState =
+  maybe
+    []
+    ((:[]) . renderDialog (appState ^. errorDialog) . hCenter . padAll 1 . strWrap)
+    (appState ^. errorDialogMessage)
+
+homeScreenLayer :: AppState -> [Widget Name]
+homeScreenLayer appState =
+  if appState ^. loggedIn then
+    [ vBox
+      [ hBox [
+        hLimit 50 $
+          borderWithLabel (str "Conversations") $ renderList drawItem True (appState ^. listConversations)
+      , case appState ^. focusConversation of
+          Nothing -> selectConversationStandbyScreen
+          Just focused -> conversation focused (appState ^. messageInput)
+      ]
+      , padLeft (Pad 1) $ padRight (Pad 1) $ hBox [
+          padRight Max $ str "Logged in as wooblyfloof"
+        , padLeft Max $ str $ case appState ^. focusConversation of
+            Nothing -> "(n) New conversation (r) Refresh (h) Help (q) Quit"
+            Just _ -> "(Esc) Return to main menu"
+        ]
       ]
     ]
+  else []
 
 selectConversationStandbyScreen :: Widget Name
 selectConversationStandbyScreen = border $ vCenter $ hCenter (str "Select a conversation")
@@ -265,8 +272,8 @@ selectedAttr = attrName "selected"
 conversationsList :: [UserId] -> List Name UserId
 conversationsList froms = list ConversationsList (Vector.fromList froms) 1
 
-errorDialog :: Dialog ErrorDialogButtons Name
-errorDialog = dialog (Just $ str "Error") (Just (OkButton, choices)) 50
+errorDialog' :: Dialog ErrorDialogButtons Name
+errorDialog' = dialog (Just $ str "Error") (Just (OkButton, choices)) 50
   where choices = [ ("Okay", OkButton, Ok)]
 
 updateMessageStore :: UMS.UserMessageStore -> EventM Name AppState ()
@@ -306,7 +313,7 @@ handleEvent ev = do
       VtyEvent (EvKey KEnter []) ->
         let enteredText = sanitizeEditContents $ getEditContents (appState^.popupTextInput)
         in case mkUserId enteredText of
-          Left errMsg -> modify $ \st -> st & userIdValidationError .~ Just errMsg
+          Left errMsg -> modify $ \st -> st & errorDialogMessage .~ Just errMsg
           Right userId -> do
             liftIO (runClientM (register $ RegisterRequest userId) (appState ^. clientEnv))
               >>= \case
@@ -316,7 +323,7 @@ handleEvent ev = do
                       if responseStatusCode resp == status412
                         then do
                           let body = C8.unpack $ BS.toStrict $ responseBody resp
-                          modify $ \st -> st & userIdValidationError .~ Just body
+                          modify $ \st -> st & errorDialogMessage .~ Just body
                         else halt -- Server error
                     _ -> halt -- Connection or decoding error
                 Right registerResponse -> do
@@ -334,8 +341,8 @@ handleEvent ev = do
   -- User tries to register with an invalid or already taken user ID
   else if badUserIdAttempt appState
     then case ev of
-      VtyEvent (EvKey KEnter []) -> modify $ \st -> st & userIdValidationError .~ Nothing
-      VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
+      VtyEvent (EvKey KEnter []) -> modify $ \st -> st & errorDialogMessage .~ Nothing
+      VtyEvent ev' -> zoom errorDialog $ handleDialogEvent ev'
       _ -> pure ()
 
   -- Logged in, no conversation opened
@@ -358,30 +365,37 @@ handleEvent ev = do
   else if startNewConversation appState
     then case ev of
       VtyEvent (EvKey KEnter []) ->
-        let enteredText = sanitizeEditContents $ getEditContents (appState^.popupTextInput)
+        let enteredText = sanitizeEditContents $ getEditContents (appState ^. popupTextInput)
         in case mkUserId enteredText of
-          Left err -> do
-            modify $ \st -> st
-              & userIdValidationError .~ Just err
-              & newConversation .~ False
-          Right recipientUserId -> do
-            writeCommandChannel $ Worker.AddConversation recipientUserId
-            modify $ \st -> st
-              & popupTextInput %~ applyEdit clearZipper
-              & newConversation .~ False
+          Left err -> modify $ \st -> st & errorDialogMessage .~ Just err
+          Right recipientUserId -> writeCommandChannel $ Worker.AddConversation recipientUserId
       VtyEvent (EvKey KEsc []) -> do
         modify $ \st -> st
           & popupTextInput %~ applyEdit clearZipper
           & newConversation .~ False
+      -- Added a new conversation
+      AppEvent (Worker.AddConversationSuccess newUserId verificationToken) -> do
+        messageStore <- gets (^. userMessageStore)
+        let updatedMessageStore = UMS.addUser newUserId verificationToken messageStore
+            newUserIdList = Map.keys updatedMessageStore
+        modify $ \st -> st
+          & userMessageStore .~ updatedMessageStore -- update user message store
+          & listConversations .~ conversationsList newUserIdList -- update message list
+          & popupTextInput %~ applyEdit clearZipper
+          & newConversation .~ False
+      -- Failed to add conversation
+      AppEvent (Worker.AddConversationFailure errMsg) ->
+        modify $ \st -> st
+          & errorDialogMessage .~ Just (Text.unpack errMsg)
       _ -> zoom popupTextInput $ handleEditorEvent ev
 
   else if badRecipientAttempt appState
     then case ev of
       VtyEvent (EvKey KEnter []) ->
         modify $ \st -> st
-          & userIdValidationError .~ Nothing
+          & errorDialogMessage .~ Nothing
           & newConversation .~ True
-      VtyEvent ev' -> zoom dialogError $ handleDialogEvent ev'
+      VtyEvent ev' -> zoom errorDialog $ handleDialogEvent ev'
       _ -> pure ()
 
   -- A conversation is opened
@@ -423,7 +437,7 @@ handleEvent ev = do
 
 theApp :: App AppState Worker.WorkerEvent Name
 theApp = App
-  { appDraw = drawUi
+  { appDraw = renderer
   , appChooseCursor = showFirstCursor
   , appHandleEvent = handleEvent
   , appStartEvent = return ()
@@ -461,7 +475,7 @@ main = do
               clientEnv'
               editorGetUserId
               editorMessage
-              errorDialog
+              errorDialog'
               Nothing
               (conversationsList [])
               Nothing
@@ -471,15 +485,16 @@ main = do
               UMS.emptyUserMessageStore
               False
 
-      commandWorkerTid <-
-        forkIO $
-          commandWorker
-            clientEnv' workerEventBChan workerCommandBChan' sessionStateTVar' userKeyStore systemTimezone
+      let workerEnv =
+            Worker.WorkerEnv
+              sessionStateTVar'
+              userKeyStore
+              clientEnv'
+              systemTimezone
 
-      pollingWorkerTid <-
-        forkIO $
-          pollingWorker
-            clientEnv' workerEventBChan sessionStateTVar' userKeyStore systemTimezone
+      commandWorkerTid <- forkIO $ commandWorker workerEnv workerEventBChan workerCommandBChan'
+
+      pollingWorkerTid <- forkIO $ pollingWorker workerEnv workerEventBChan
 
       (_, vty) <-
         customMainWithDefaultVty (Just workerEventBChan) theApp initState
@@ -496,43 +511,35 @@ sanitizeEditContents = \case
 
 commandWorker
   :: MonadIO m
-  => ClientEnv
+  => Worker.WorkerEnv
   -> BChan Worker.WorkerEvent
   -> BChan Worker.WorkerCommand
-  -> TVar (Maybe SS.SessionState)
-  -> TVar (UKS.UserKeyStore)
-  -> TimeZone
   -> m ()
-commandWorker clientEnv' workerEventBChan' workerCommandBChan' sessionStateTVar' userKeyStore timezone =
-  forever $ do
+commandWorker workerEnv workerEventBChan' workerCommandBChan' = forever $ do
     gotCommand <- liftIO $ readBChan workerCommandBChan'
-    maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
-    case maybeSessionState of
-      Nothing -> pure ()
-      Just sessionState ->
-        case gotCommand of
-          Worker.AddConversation newUser -> do
-            workerResult <- Worker.addConversationWorker sessionState userKeyStore clientEnv' newUser
-            liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
-          Worker.SendMessage recipient message -> do
-            workerResult <- Worker.sendMessageWorker sessionState userKeyStore clientEnv' recipient message timezone
-            liftIO $ writeBChan workerEventBChan' (Worker.NewMessages workerResult)
+    case gotCommand of
+      Worker.AddConversation newUser -> do
+        workerResult <- Worker.runWorker workerEnv $ Worker.addConversationWorker' newUser
+        case workerResult of
+          Left (Worker.FriendlyServerError errMsg) ->
+            liftIO $ writeBChan workerEventBChan' (Worker.AddConversationFailure errMsg)
+          Right verToken -> liftIO $ writeBChan workerEventBChan' (Worker.AddConversationSuccess newUser verToken)
+      Worker.SendMessage recipient message -> do
+        workerResult <- Worker.runWorker workerEnv $ Worker.sendMessageWorker recipient message
+        case workerResult of
+          Left _ -> pure ()
+          Right res -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages res )
 
 pollingWorker
   :: MonadIO m
-  => ClientEnv
+  => Worker.WorkerEnv
   -> BChan Worker.WorkerEvent
-  -> TVar (Maybe SS.SessionState)
-  -> TVar (UKS.UserKeyStore)
-  -> TimeZone
   -> m ()
-pollingWorker clientEnv' workerEventBChan' sessionStateTVar' userKeyStore timezone = forever $ do
-  maybeSessionState <- liftIO $ readTVarIO sessionStateTVar'
-  case maybeSessionState of
-    Nothing -> pure ()
-    Just sessionState -> do
-      workerResult <- Worker.getMessagesWorker sessionState userKeyStore clientEnv' timezone
-      case workerResult of
-        Nothing -> pure ()
-        Just newMessages -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages newMessages)
+pollingWorker workerEnv workerEventBChan' = forever $ do
+  workerResult <- Worker.runWorker workerEnv $ Worker.getMessagesWorker
+  case workerResult of
+    Left _ -> pure ()
+    Right res -> case res of
+      Nothing -> pure ()
+      Just res' -> liftIO $ writeBChan workerEventBChan' (Worker.NewMessages res')
   liftIO $ threadDelay 2000000 -- 2 second sleep

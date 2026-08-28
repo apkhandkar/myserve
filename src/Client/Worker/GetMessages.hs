@@ -1,12 +1,17 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 
 module Client.Worker.GetMessages
   ( getMessagesWorker
   , WorkerCommand(..)
   , WorkerEvent(..)
   , addConversationWorker
+  , addConversationWorker'
   , sendMessageWorker
+  , runWorker
+  , WorkerEnv(..)
+  , WorkerError(..)
   )
 where
 
@@ -15,12 +20,12 @@ import Data.UUID.V4 qualified as UUID
 import Client.SessionState qualified as SessionState
 import Client.SessionState (SessionState)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Servant.Client (ClientEnv, runClientM)
+import Servant.Client (ClientEnv, runClientM, ClientError (FailureResponse), ResponseF (responseStatusCode, responseBody))
 import Api.GetMessages qualified as GetMessages
 import Api.Client (getMessages, getEncryptionKey, sendMessage)
 import Client.UserKeyStore qualified as UKS
 import Client.UserMessageStore qualified as UMS
-import GHC.Conc (TVar, readTVarIO, writeTVar, atomically)
+import GHC.Conc (TVar, readTVarIO, writeTVar, atomically, readTVar, retry)
 import Data.Map qualified as Map
 import Crypto qualified
 import Control.Monad (forM, unless)
@@ -29,43 +34,81 @@ import qualified Api.GetMessages as GetMessage
 import UserId (UserId)
 import Data.Text (Text)
 import Data.Time (getCurrentTime, TimeZone)
-import Data.Time.LocalTime (getCurrentTimeZone, utcToLocalTime)
+import Data.Time.LocalTime (utcToLocalTime)
+import Control.Monad.Reader (ReaderT (runReaderT), MonadReader(ask), asks)
+import Control.Exception (Exception)
+import Control.Monad.Error.Class (MonadError (throwError))
+import Control.Monad.Except (ExceptT, runExceptT)
+import Network.HTTP.Types (status400)
+import Data.Text.Encoding (decodeUtf8)
+import Data.ByteString qualified as ByteString
 
 data WorkerCommand
   = AddConversation UserId
   | SendMessage UserId Text
 
-data WorkerEvent = NewMessages UMS.UserMessageStore
+data WorkerEvent =
+    NewMessages UMS.UserMessageStore
+  | AddConversationSuccess UserId Crypto.VerificationToken
+  | AddConversationFailure Text
+
+newtype WorkerM a = WorkerM {runWorkerM :: (ReaderT WorkerEnv (ExceptT WorkerError IO) a)}
+  deriving (Functor, Applicative, Monad, MonadIO, MonadReader WorkerEnv, MonadError WorkerError)
+
+data WorkerError = FriendlyServerError Text 
+  deriving Show
+
+instance Exception WorkerError
+
+runWorker :: MonadIO m => WorkerEnv -> WorkerM a -> m (Either WorkerError a)
+runWorker env worker = liftIO $ runExceptT $ runReaderT (runWorkerM worker) env
+
+data WorkerEnv = WorkerEnv
+  { sessionStateTVar :: TVar (Maybe SessionState)
+  , userKeyStore :: TVar UKS.UserKeyStore
+  , clientEnv :: ClientEnv
+  , systemTimezone :: TimeZone
+  }
+
+-- | Run a worker that needs SessionState
+withActiveSession :: (SessionState -> WorkerM a) -> WorkerM a
+withActiveSession worker = do
+  sessionStateTVar' <- asks sessionStateTVar
+  sessionState <- liftIO $ atomically $
+    readTVar sessionStateTVar' >>= maybe retry pure
+  worker sessionState
 
 sendMessageWorker
-  :: MonadIO m
-  => SessionState
-  -> TVar UKS.UserKeyStore
-  -> ClientEnv
-  -> UserId
+  :: UserId
   -> Text
-  -> TimeZone
-  -> m UMS.UserMessageStore
-sendMessageWorker sessionState userKeyStore clientEnv recipient message timezone = do
+  -> WorkerM UMS.UserMessageStore
+sendMessageWorker recipient message = withActiveSession $ \sessionState -> do
+  workerEnv <- ask 
   -- Check whether we already have user keys...
-  keyStore <- liftIO $ readTVarIO userKeyStore
+  keyStore <- liftIO $ readTVarIO $ userKeyStore workerEnv
   userKeys <- case Map.lookup recipient keyStore of
     Just keys -> pure keys
     Nothing -> do
       userKeysResponseEi <-
-        liftIO $ runClientM (getEncryptionKey (SessionState.authToken sessionState) recipient) clientEnv
+        liftIO
+          $ runClientM
+              (getEncryptionKey (SessionState.authToken sessionState) recipient)
+              (clientEnv workerEnv)
       case userKeysResponseEi of
         Left _ -> error "Failed to get user keys"
         Right (UKS.mkUserKeys -> userKeys) -> do
           -- Update the user key store
-          liftIO $ atomically $ writeTVar userKeyStore (Map.insert recipient userKeys $ keyStore)
+          liftIO $ atomically $ writeTVar (userKeyStore workerEnv) (Map.insert recipient userKeys $ keyStore)
           pure userKeys
   symmetricKey <- liftIO Crypto.generateSymmetricKey
   nonce' <- liftIO Crypto.generateNonce
   messageId' <- liftIO UUID.nextRandom
   messageTimestamp' <- liftIO getCurrentTime
   let associatedData =
-        Crypto.AssociatedData (SessionState.userId sessionState) recipient messageId' messageTimestamp'
+        Crypto.AssociatedData
+          (SessionState.userId sessionState)
+          recipient messageId'
+          messageTimestamp'
       (authTag, encryptedMessage) =
         fromRight (error "Failed to encrypt message") $
           Crypto.encryptMessage symmetricKey nonce' (Crypto.PlaintextMessage message) associatedData
@@ -84,7 +127,11 @@ sendMessageWorker sessionState userKeyStore clientEnv recipient message timezone
           authTag
           nonce'
           signature
-  respEi <- liftIO $ runClientM (sendMessage (SessionState.authToken sessionState) request) clientEnv
+  respEi <-
+    liftIO $
+      runClientM
+        (sendMessage (SessionState.authToken sessionState) request)
+        (clientEnv workerEnv)
   case respEi of
     Left _ -> error "Failed to send message"
     Right _ -> do
@@ -97,29 +144,67 @@ sendMessageWorker sessionState userKeyStore clientEnv recipient message timezone
             UMS.UserMessages
               verificationToken
               []
-              [UMS.DecryptedMessage (Crypto.PlaintextMessage message) (utcToLocalTime timezone messageTimestamp')]
+              [
+                UMS.DecryptedMessage
+                  (Crypto.PlaintextMessage message)
+                  (utcToLocalTime (systemTimezone workerEnv) messageTimestamp')
+              ]
       pure $ Map.fromList [(recipient, newMessageStore)]
 
-addConversationWorker
-  :: MonadIO m
-  => SessionState
-  -> TVar UKS.UserKeyStore
-  -> ClientEnv
-  -> UserId
-  -> m UMS.UserMessageStore
-addConversationWorker sessionState userKeyStore clientEnv userId = do
+addConversationWorker' :: UserId -> WorkerM Crypto.VerificationToken 
+addConversationWorker' userId = withActiveSession $ \sessionState -> do
+  workerEnv <- ask
   -- Check whether we already have user keys...
-  keyStore <- liftIO $ readTVarIO userKeyStore
+  keyStore <- liftIO $ readTVarIO (userKeyStore workerEnv)
   userKeys <- case Map.lookup userId keyStore of
     Just keys -> pure keys
     Nothing -> do
       userKeysResponseEi <-
-        liftIO $ runClientM (getEncryptionKey (SessionState.authToken sessionState) userId) clientEnv
+        liftIO $
+          runClientM
+            (getEncryptionKey (SessionState.authToken sessionState) userId)
+            (clientEnv workerEnv) 
       case userKeysResponseEi of
-        Left _ -> error "Failed to get user keys"
+        Left (FailureResponse _ resp) -> do
+          if responseStatusCode resp == status400 
+            then throwError $ FriendlyServerError $ decodeUtf8 $ ByteString.toStrict $ responseBody resp 
+            else error "Failed to get user keys"
+        Left _ -> error "Server error"
         Right (UKS.mkUserKeys -> userKeys) -> do
           -- Update the user key store
-          liftIO $ atomically $ writeTVar userKeyStore (Map.insert userId userKeys $ keyStore)
+          liftIO $ atomically $ writeTVar (userKeyStore workerEnv) (Map.insert userId userKeys $ keyStore)
+          pure userKeys
+  -- Compute verification token for user
+  let verificationToken =
+        fromRight (error "Could not compute verification token") $
+          Crypto.generateVerificationToken
+            (SessionState.verificationKey sessionState)
+            (UKS.verificationKey userKeys)
+  pure verificationToken
+
+
+addConversationWorker :: UserId -> WorkerM UMS.UserMessageStore
+addConversationWorker userId = withActiveSession $ \sessionState -> do
+  workerEnv <- ask
+  -- Check whether we already have user keys...
+  keyStore <- liftIO $ readTVarIO (userKeyStore workerEnv)
+  userKeys <- case Map.lookup userId keyStore of
+    Just keys -> pure keys
+    Nothing -> do
+      userKeysResponseEi <-
+        liftIO $
+          runClientM
+            (getEncryptionKey (SessionState.authToken sessionState) userId)
+            (clientEnv workerEnv) 
+      case userKeysResponseEi of
+        Left (FailureResponse _ resp) -> do
+          if responseStatusCode resp == status400 
+            then throwError $ FriendlyServerError $ decodeUtf8 $ ByteString.toStrict $ responseBody resp 
+            else error "Failed to get user keys"
+        Left _ -> error "Server error"
+        Right (UKS.mkUserKeys -> userKeys) -> do
+          -- Update the user key store
+          liftIO $ atomically $ writeTVar (userKeyStore workerEnv) (Map.insert userId userKeys $ keyStore)
           pure userKeys
   -- Compute verification token for user
   let verificationToken =
@@ -130,15 +215,14 @@ addConversationWorker sessionState userKeyStore clientEnv userId = do
   let emptyMessages = UMS.UserMessages verificationToken [] []
   pure $ Map.fromList [(userId, emptyMessages)]
 
-getMessagesWorker
-  :: MonadIO m
-  => SessionState
-  -> TVar UKS.UserKeyStore
-  -> ClientEnv
-  -> TimeZone
-  -> m (Maybe UMS.UserMessageStore)
-getMessagesWorker sessionState userKeyStore clientEnv timezone = do
-  responseEi <- liftIO $ runClientM (getMessages $ SessionState.authToken sessionState) clientEnv
+getMessagesWorker :: WorkerM (Maybe UMS.UserMessageStore)
+getMessagesWorker = withActiveSession $ \sessionState -> do
+  workerEnv <- ask
+  responseEi <-
+    liftIO $
+      runClientM
+        (getMessages $ SessionState.authToken sessionState)
+        (clientEnv workerEnv)
   case responseEi of
     Left _ -> error "Failed to get messages" -- TODO
     Right newMessages -> do
@@ -146,20 +230,26 @@ getMessagesWorker sessionState userKeyStore clientEnv timezone = do
         then pure $ Nothing -- No messages were received
         else do
           -- Map messages by sender user IDs
-          let foo = Map.toList $ Map.fromListWith (<>) $ fmap (\msg -> (GetMessages.fromUser msg, [msg])) newMessages
-          newMessagesList <- forM foo $ \(userId, messages) -> do
+          let messagesByUserId =
+                Map.toList $ Map.fromListWith (<>) $ fmap (\msg -> (GetMessages.fromUser msg, [msg])) newMessages
+          newMessagesList <- forM messagesByUserId $ \(userId, messages) -> do
             -- Check whether we have user keys
-            keyStore <- liftIO $ readTVarIO userKeyStore
+            keyStore <- liftIO $ readTVarIO (userKeyStore workerEnv)
             userKeys <- case Map.lookup userId keyStore of
                 Nothing -> do
                   -- Get user keys
                   userKeysResponseEi <-
-                    liftIO $ runClientM (getEncryptionKey (SessionState.authToken sessionState) userId) clientEnv
+                    liftIO $
+                      runClientM
+                        (getEncryptionKey (SessionState.authToken sessionState) userId)
+                        (clientEnv workerEnv)
                   case userKeysResponseEi of
                     Left _ -> error "Failed to get user keys"
                     Right (UKS.mkUserKeys -> userKeys) -> do
                       -- Update the user key store
-                      liftIO $ atomically $ writeTVar userKeyStore (Map.insert userId userKeys $ keyStore)
+                      liftIO
+                        $ atomically
+                        $ writeTVar (userKeyStore workerEnv) (Map.insert userId userKeys $ keyStore)
                       pure userKeys
                 Just userKeys -> pure userKeys
             -- Compute verification token for the user
@@ -199,7 +289,11 @@ getMessagesWorker sessionState userKeyStore clientEnv timezone = do
                       associatedData
               case decryptionResult of
                 Left _ -> error "Failed to decrypt!"
-                Right decryptedMessage -> pure $ UMS.DecryptedMessage decryptedMessage (utcToLocalTime timezone $ GetMessage.messageTimestamp message)
+                Right decryptedMessage ->
+                  pure $
+                    UMS.DecryptedMessage
+                      decryptedMessage
+                      (utcToLocalTime (systemTimezone workerEnv) $ GetMessage.messageTimestamp message)
             pure $
               ( userId
               , UMS.UserMessages
