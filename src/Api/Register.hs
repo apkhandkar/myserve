@@ -54,24 +54,24 @@ import Servant
 
 type Register =
   "v1"
-    :> "register"
+    :> "new-register"
     :> ReqBody '[JSON] RegisterRequest
-    :> Post '[JSON] RegisterResponse 
+    :> Post '[JSON] RegisterResponse
 
 data RegisterRequest = RegisterRequest
-  {requestedUserId :: UserId}
+  { requestedUserId :: UserId
+  , encryptionKey :: Crypto.EncryptionKey
+  , verificationKey :: Crypto.VerificationKey
+  }
   deriving (Generic, FromJSON, Show, ToJSON)
 
-data RegisterResponse = RegisterResponse
-  { decryptionKey :: Crypto.DecryptionKey
-  , signingKey :: Crypto.SigningKey
-  , verificationKey :: Crypto.VerificationKey
-  , authToken :: UUID
+newtype RegisterResponse = RegisterResponse
+  { authToken :: UUID
   }
   deriving (Generic, FromJSON, Show, ToJSON)
 
 register
-  :: RegisterRequest -> MyServeHandler RegisterResponse 
+  :: RegisterRequest -> MyServeHandler RegisterResponse
 register (RegisterRequest{..}) = do
   userIdMatches <-
     runDb $
@@ -84,28 +84,18 @@ register (RegisterRequest{..}) = do
     Nothing -> throwError err500
     Just 0 -> do
       joined <- liftIO getCurrentTime
-      token <- liftIO UUID.nextRandom
-      (encryptionKey', decryptionKey') <- liftIO Crypto.generateEncryptionKeyPair
-      (verificationKey', signingKey') <- liftIO Crypto.generateSigningKeyPair
+      authToken <- liftIO UUID.nextRandom
       runDb $
         runInsert $
           insert (users devDb) $
             insertValues
               [ User
                   { userId = requestedUserId
-                  , joined
-                  , authToken = token 
-                  , encryptionKey = encryptionKey'
-                  , verificationKey = verificationKey'
                   , lastActiveAt = Nothing
+                  , ..
                   }
               ]
-      pure $ RegisterResponse
-        { decryptionKey = decryptionKey'
-        , signingKey = signingKey'
-        , verificationKey = verificationKey'
-        , authToken = token
-        } 
+      pure $ RegisterResponse {..}
     Just _ ->
       throwError
         err412{errBody = "That user ID is already taken."}

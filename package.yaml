@@ -41,6 +41,7 @@ dependencies:
 - microlens
 - vector
 - time
+- websockets
 
 ghc-options:
 - -Wall

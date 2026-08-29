@@ -1,6 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Client.Worker.GetMessages
   ( getMessagesWorker
@@ -12,17 +14,19 @@ module Client.Worker.GetMessages
   , runWorker
   , WorkerEnv(..)
   , WorkerError(..)
+  , registerWorker
   )
 where
 
 import Api.SendMessage (SendMessageRequest (SendMessageRequest))
 import Data.UUID.V4 qualified as UUID
 import Client.SessionState qualified as SessionState
-import Client.SessionState (SessionState)
+import Client.SessionState (SessionState(SessionState))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Servant.Client (ClientEnv, runClientM, ClientError (FailureResponse), ResponseF (responseStatusCode, responseBody))
 import Api.GetMessages qualified as GetMessages
-import Api.Client (getMessages, getEncryptionKey, sendMessage)
+import Api.Register (RegisterRequest(..), RegisterResponse(..))
+import Api.Client (getMessages, getEncryptionKey, sendMessage, register)
 import Client.UserKeyStore qualified as UKS
 import Client.UserMessageStore qualified as UMS
 import GHC.Conc (TVar, readTVarIO, writeTVar, atomically, readTVar, retry)
@@ -39,16 +43,19 @@ import Control.Monad.Reader (ReaderT (runReaderT), MonadReader(ask), asks)
 import Control.Exception (Exception)
 import Control.Monad.Error.Class (MonadError (throwError))
 import Control.Monad.Except (ExceptT, runExceptT)
-import Network.HTTP.Types (status400)
+import Network.HTTP.Types (status400, status412)
 import Data.Text.Encoding (decodeUtf8)
 import Data.ByteString qualified as ByteString
 
 data WorkerCommand
-  = AddConversation UserId
+  = Register UserId
+  | AddConversation UserId
   | SendMessage UserId Text
 
 data WorkerEvent =
     NewMessages UMS.UserMessageStore
+  | RegisterSuccess
+  | RegisterFailure Text
   | AddConversationSuccess UserId Crypto.VerificationToken
   | AddConversationFailure Text
 
@@ -69,6 +76,28 @@ data WorkerEnv = WorkerEnv
   , clientEnv :: ClientEnv
   , systemTimezone :: TimeZone
   }
+
+registerWorker :: UserId -> WorkerM SessionState
+registerWorker requestedUserId = do
+  workerEnv <- ask
+  -- Generate key pair
+  (encryptionKey, decryptionKey) <- liftIO Crypto.generateEncryptionKeyPair
+  (verificationKey, signingKey) <- liftIO Crypto.generateSigningKeyPair
+  -- Attempt to register
+  let registerRequest = RegisterRequest {..}
+  liftIO (runClientM (register registerRequest) (clientEnv workerEnv))
+    >>= \case
+          Left (FailureResponse _ resp) ->
+            if responseStatusCode resp == status412
+              then throwError $ FriendlyServerError $ decodeUtf8 $ ByteString.toStrict $ responseBody resp
+              else error $ show resp -- todo properly handle
+          Left _ -> error "Connection or decoding error" -- todo properly handle
+          Right resp ->
+            pure $ SessionState
+              { userId = requestedUserId
+              , authToken = authToken resp
+              , ..
+              }
 
 -- | Run a worker that needs SessionState
 withActiveSession :: (SessionState -> WorkerM a) -> WorkerM a

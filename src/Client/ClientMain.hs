@@ -7,26 +7,22 @@
 module Client.ClientMain (main, ClientConfig(..), AppState(..)) where
 
 import Options.Applicative qualified as Opt
-import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, ClientEnv, ClientError (FailureResponse), ResponseF (responseStatusCode, responseBody))
+import Servant.Client (mkClientEnv, BaseUrl(..), Scheme (Http), runClientM, ClientEnv)
 import Network.HTTP.Client (newManager, defaultManagerSettings)
-import Api.Client (serviceAvailable, register)
+import Api.Client (serviceAvailable)
 import System.Exit (exitFailure)
 import Brick (Widget, str, hLimit, (<=>), padTop, Padding (Pad, Max), txt, BrickEvent (VtyEvent, AppEvent), EventM, get, zoom, padAll, App (App, appDraw, appChooseCursor, appHandleEvent, appStartEvent, appAttrMap), showFirstCursor, attrMap, AttrName, bg, strWrap, withAttr, attrName, on, halt, padRight, padLeft, vBox, hBox, gets, padBottom, customMainWithDefaultVty, ViewportScroll (vScrollBy, vScrollToEnd, vScrollToBeginning, vScrollPage), viewportScroll, ViewportType (Vertical), viewport, Direction (Up, Down), modify)
 import Brick.Widgets.Edit (Editor, renderEditor, editorText, getEditContents, handleEditorEvent, applyEdit)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Brick.Widgets.Dialog (renderDialog, Dialog, dialog, handleDialogEvent, buttonSelectedAttr)
-import Api.Register (RegisterRequest (RegisterRequest))
 import Lens.Micro.TH (makeLenses)
 import Brick.Widgets.Center (vCenter, hCenter, vCenterLayer, hCenterLayer)
 import Brick.Widgets.Border (borderWithLabel, border)
 import Data.Maybe (isNothing, isJust)
 import Graphics.Vty (Event(EvKey), Key (KEsc, KEnter, KChar, KDown, KUp, KHome, KEnd, KPageUp, KPageDown), defAttr, Attr, yellow, white, blue, withStyle, italic, bold, Vty (shutdown), Modifier (MCtrl), dim)
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Network.HTTP.Types (status412)
-import Data.ByteString.Char8 qualified as C8
 import Lens.Micro ((^.), (.~), (&), (%~))
-import Data.ByteString qualified as BS
 import Brick.Widgets.List (list, List, renderList, handleListEvent, listSelectedElement)
 import Data.Vector qualified as Vector
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTimeZone )
@@ -314,28 +310,13 @@ handleEvent ev = do
         let enteredText = sanitizeEditContents $ getEditContents (appState^.popupTextInput)
         in case mkUserId enteredText of
           Left errMsg -> modify $ \st -> st & errorDialogMessage .~ Just errMsg
-          Right userId -> do
-            liftIO (runClientM (register $ RegisterRequest userId) (appState ^. clientEnv))
-              >>= \case
-                Left err -> do
-                  case err of
-                    FailureResponse _ resp ->
-                      if responseStatusCode resp == status412
-                        then do
-                          let body = C8.unpack $ BS.toStrict $ responseBody resp
-                          modify $ \st -> st & errorDialogMessage .~ Just body
-                        else halt -- Server error
-                    _ -> halt -- Connection or decoding error
-                Right registerResponse -> do
-                  sessionStateTVar' <- gets (^. sessionStateTVar)
-                  liftIO
-                    $ atomically
-                    $ writeTVar sessionStateTVar' (Just $ SS.mkSessionState userId registerResponse)
-                  modify $ \st -> st
-                    & popupTextInput %~ applyEdit clearZipper
-                    & loggedIn .~ True
+          Right userId -> writeCommandChannel $ Worker.Register userId
       VtyEvent (EvKey KEsc []) -> halt
       VtyEvent _ -> zoom popupTextInput $ handleEditorEvent ev
+      AppEvent Worker.RegisterSuccess ->
+        modify $ \st -> st & popupTextInput %~ applyEdit clearZipper & loggedIn .~ True
+      AppEvent (Worker.RegisterFailure errMsg) ->
+        modify $ \st -> st & errorDialogMessage .~ Just (Text.unpack errMsg)
       _ -> pure ()
 
   -- User tries to register with an invalid or already taken user ID
@@ -518,11 +499,19 @@ commandWorker
 commandWorker workerEnv workerEventBChan' workerCommandBChan' = forever $ do
     gotCommand <- liftIO $ readBChan workerCommandBChan'
     case gotCommand of
+      Worker.Register requestedUserId -> do
+        workerResult <- Worker.runWorker workerEnv $ Worker.registerWorker requestedUserId
+        case workerResult of
+          Left (Worker.FriendlyServerError errMsg) ->
+            liftIO $ writeBChan workerEventBChan' $ Worker.RegisterFailure errMsg
+          Right sessionState -> liftIO $ do
+            atomically $ writeTVar (Worker.sessionStateTVar workerEnv) (Just sessionState)
+            writeBChan workerEventBChan' $ Worker.RegisterSuccess
       Worker.AddConversation newUser -> do
         workerResult <- Worker.runWorker workerEnv $ Worker.addConversationWorker' newUser
         case workerResult of
           Left (Worker.FriendlyServerError errMsg) ->
-            liftIO $ writeBChan workerEventBChan' (Worker.AddConversationFailure errMsg)
+            liftIO $ writeBChan workerEventBChan' $ Worker.AddConversationFailure errMsg
           Right verToken -> liftIO $ writeBChan workerEventBChan' (Worker.AddConversationSuccess newUser verToken)
       Worker.SendMessage recipient message -> do
         workerResult <- Worker.runWorker workerEnv $ Worker.sendMessageWorker recipient message
