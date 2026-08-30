@@ -2,10 +2,13 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 
 module UserId
   ( UserId(userIdToText, UserId)
+  , OurUserId(..)
+  , TheirUserId(..)
   , mkUserId
   )
 where
@@ -22,9 +25,16 @@ import Data.Aeson (FromJSON(parseJSON), withText, ToJSON(toJSON))
 import Database.Beam (HasSqlEqualityCheck)
 import Servant (FromHttpApiData(parseUrlPiece), ToHttpApiData(toUrlPiece))
 import Data.Either.Extra (mapLeft)
+import Codec.Serialise (Serialise)
 
 newtype UserId = UserId {userIdToText :: Text}
-  deriving newtype (Eq, Ord)
+  deriving newtype (Eq, Ord, Serialise)
+
+newtype OurUserId = OurUserId {unwrapOurUserId :: UserId}
+  deriving newtype (Eq, Ord, Serialise)
+
+newtype TheirUserId = TheirUserId {unwrapTheirUserId :: UserId}
+  deriving newtype (Eq, Ord, Serialise)
 
 instance Show UserId where
   show = Text.unpack . userIdToText
