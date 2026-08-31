@@ -8,7 +8,8 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module Crypto.DoubleRatchet.Ratchet
-  ( MessageKey
+  ( ChainKey
+  , MessageKey
   , ReceivingChainKey
   , RootKey
   , SendingChainKey
@@ -91,6 +92,7 @@ instance ChainKey ReceivingChainKey where
 
 -- | Used to encrypt and decrypt messages
 newtype MessageKey = MessageKey ByteString
+  deriving Eq
 
 -- | The root ratchet derives the message key chains
 

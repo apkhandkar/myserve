@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Crypto.DoubleRatchet.Curve25519
   ( Curve25519.DhSecret
@@ -16,9 +17,13 @@ import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Char8 qualified as Char8
 
 newtype PublicKey = PublicKey {unwrapPublicKey :: Curve25519.PublicKey}
+  deriving Eq
 
 instance Show PublicKey where
   show = Char8.unpack . encodePublicKey
+
+instance Ord PublicKey where
+  compare (PublicKey pk1) (PublicKey pk2) = compare @ByteString (convert pk1) (convert pk2)
 
 encodePublicKey :: PublicKey -> ByteString
 encodePublicKey = Base64.encode . convert . unwrapPublicKey

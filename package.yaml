@@ -43,6 +43,7 @@ dependencies:
 - time
 - websockets
 - serialise
+- lens
 
 ghc-options:
 - -Wall
