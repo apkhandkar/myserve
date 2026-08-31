@@ -8,7 +8,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module Crypto.DoubleRatchet.Ratchet
-  ( ChainKey
+  ( ChainKey(..)
   , MessageKey
   , ReceivingChainKey
   , RootKey
@@ -17,6 +17,10 @@ module Crypto.DoubleRatchet.Ratchet
   , advanceReceivingRatchet
   , advanceSendingRatchet
   , initializeRootRatchet
+  --
+  , mkV1RatchetContext
+  , mkReceivingChainKeyContextData
+  , mkSendingChainKeyContextData
   )
 where
 
@@ -72,21 +76,21 @@ mkV1RatchetContext contextData =
 
 -- | Use to derive chain key and the next root key
 newtype RootKey = RootKey ByteString
-  deriving newtype ByteArray.ByteArrayAccess
+  deriving newtype (Eq, ByteArray.ByteArrayAccess)
 
 class ChainKey a where
   toBytes :: a -> ByteString
   fromBytes :: ByteString -> a
 
 newtype SendingChainKey = SendingChainKey ByteString
-  deriving newtype ByteArray.ByteArrayAccess
+  deriving newtype (Eq, ByteArray.ByteArrayAccess)
 
 instance ChainKey SendingChainKey where
   toBytes (SendingChainKey bytes) = bytes
   fromBytes = SendingChainKey
 
 newtype ReceivingChainKey = ReceivingChainKey ByteString
-  deriving newtype ByteArray.ByteArrayAccess
+  deriving newtype (Eq, ByteArray.ByteArrayAccess)
 
 instance ChainKey ReceivingChainKey where
   toBytes (ReceivingChainKey bytes) = bytes

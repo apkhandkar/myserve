@@ -12,6 +12,12 @@ module Crypto.DoubleRatchet.Ratchet.State
   , advanceSendingChain
   , advanceSendingRatchet
   , initializeRatchetState
+  , previousSendingChainLength
+  , receivingChainKey
+  , receivingChainState
+  , root
+  , sendingChainKey
+  , sendingChainState
   )
 where
 
@@ -200,13 +206,14 @@ advanceReceivingRatchet dhPubKey previousChainLength secretKey ourUserId theirUs
           newDhSecret
   root .= newRoot
   receivingChainState . receivingChainKey .= newReceivingChainKey
+  receivingChainState . receivingChainEpoch .= dhPubKey
 
 advanceFromTo :: Ratchet.ChainKey a => Int -> Int -> a -> ([MessageKeyAndIndex], a)
 advanceFromTo from to chainKey =
   if from == to
     then ([], chainKey) -- no need to advance
   else if from > to
-    then ([], chainKey) -- a message came to us later than it should have
+    then ([], chainKey) -- we got ahead with processing
   else
     -- do the advance
     let newKeys = go chainKey (to - from)

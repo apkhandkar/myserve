@@ -2,11 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Crypto.DoubleRatchet.Ratchet.Demo (demo) where
+
 import UserId (UserId, unsafeMkUserId, OurUserId (OurUserId), TheirUserId (TheirUserId))
+import Lens.Micro ((^.))
 import Crypto.DoubleRatchet.Curve25519 (generateKeyPair, deriveDhSecret)
 import Crypto.DoubleRatchet.Ratchet (initializeRootRatchet)
-import Crypto.DoubleRatchet.Ratchet.State (initializeRatchetState, advanceSendingChain, advanceReceivingChain)
-import Control.Monad.State (runState)
+import Crypto.DoubleRatchet.Ratchet.State (initializeRatchetState, advanceSendingChain, advanceReceivingChain, advanceSendingRatchet, sendingChainState, previousSendingChainLength, root)
+import Control.Monad.State (runState, execState)
 import Data.Maybe (catMaybes)
 
 alice :: UserId
@@ -46,24 +48,50 @@ demo = do
         runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk1) bobRs1
       (bobRMk2, bobRs3) =
         runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk2) bobRs2
-  putStrLn $ "Alice message keys: " <> show [aliceSMk0, aliceSMk1, aliceSMk2]
-  putStrLn $ "Bob message keys: " <> show [bobRMk0, bobRMk1, bobRMk2]
   if [aliceSMk0, aliceSMk1, aliceSMk2] == catMaybes [bobRMk0, bobRMk1, bobRMk2]
-    then putStrLn "All good!"
-    else error "Sending and receiving chain keys do not match!"
+    then putStrLn "[  OK  ] Chain advance"
+    else do
+      putStrLn $ "Alice message keys: " <> show [aliceSMk0, aliceSMk1, aliceSMk2]
+      putStrLn $ "Bob message keys: " <> show [bobRMk0, bobRMk1, bobRMk2]
+      error "[FAILED] Chain advance"
   putStrLn "Generating 3 more [alice] sending keys from root..."
   let (aliceSMk3, aliceRs4) = runState advanceSendingChain aliceRs3
       (aliceSMk4, aliceRs5) = runState advanceSendingChain aliceRs4
-      (aliceSMk5, _) = runState advanceSendingChain aliceRs5
+      (aliceSMk5, aliceRs6) = runState advanceSendingChain aliceRs5
   putStrLn "Generating 3 more [bob] receiving keys from root *out-of-order*..."
   let (bobRMk5, bobRs4) =
         runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk5) bobRs3
       (bobRMk3, bobRs5) =
         runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk3) bobRs4
-      (bobRMk4, _) =
+      (bobRMk4, bobRs6) =
         runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk4) bobRs5
-  putStrLn $ "Alice message keys: " <> show [aliceSMk3, aliceSMk4, aliceSMk5]
-  putStrLn $ "Bob message keys: " <> show [bobRMk3, bobRMk4, bobRMk5]
   if [aliceSMk3, aliceSMk4, aliceSMk5] == catMaybes [bobRMk3, bobRMk4, bobRMk5]
-    then putStrLn "All good!"
-    else error "Sending and receiving chain keys do not match!"
+    then putStrLn "[  OK  ] Out-of-order chain advance"
+    else do
+      putStrLn $ "Alice message keys: " <> show [aliceSMk3, aliceSMk4, aliceSMk5]
+      putStrLn $ "Bob message keys: " <> show [bobRMk3, bobRMk4, bobRMk5]
+      error "[FAILED] Out-of-order chain advance"
+  let aliceRoot = aliceRs6 ^. root
+  let bobRoot = bobRs6 ^. root
+  if aliceRoot == bobRoot then pure () else error "Old Roots don't match!"
+  putStrLn $ "Advancing [alice] sending ratchet..."
+  (aliceSec1, alicePub1) <- generateKeyPair
+  let aliceRs7 = execState (advanceSendingRatchet aliceSec1 bobPub0 aliceAlicePov bobAlicePov) aliceRs6
+  let aliceCn0 = aliceRs7 ^. sendingChainState . previousSendingChainLength 
+  putStrLn "Generating 3 more [alice] sending keys from new root..."
+  let (aliceSMk6, aliceRs8) = runState advanceSendingChain aliceRs7
+      (aliceSMk7, aliceRs9) = runState advanceSendingChain aliceRs8
+      (aliceSMk8, _aliceRs10) = runState advanceSendingChain aliceRs9
+  putStrLn "Generating 3 more [bob] sending keys from auto-advanced receiving ratchet, out-of-order..."
+  let (bobRMk6, bobRs7) =
+        runState (advanceReceivingChain alicePub1 aliceCn0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk8) bobRs6
+      (bobRMk7, bobRs8) =
+        runState (advanceReceivingChain alicePub1 aliceCn0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk7) bobRs7
+      (bobRMk8, _bobRs8) =
+        runState (advanceReceivingChain alicePub1 aliceCn0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk6) bobRs8
+  if [aliceSMk6, aliceSMk7, aliceSMk8] == catMaybes [bobRMk8, bobRMk7, bobRMk6]
+    then putStrLn "[  OK  ] Cross-epoch out-of-order chain advance"
+    else do
+      putStrLn $ "Alice message keys: " <> show [aliceSMk6, aliceSMk7, aliceSMk8]
+      putStrLn $ "Bob message keys: " <> show [bobRMk8, bobRMk7, bobRMk6]
+      error "[FAILED] Cross-epoch out-of-order chain advance"
