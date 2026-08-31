@@ -31,6 +31,8 @@ import UserId (OurUserId (unwrapOurUserId), TheirUserId (unwrapTheirUserId), Use
 import GHC.Generics (Generic)
 import Codec.Serialise (Serialise, serialise)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
+import Data.ByteString.Char8 qualified as C8
 
 data Protocol = Speakeasy
   deriving (Generic, Serialise)
@@ -93,6 +95,9 @@ instance ChainKey ReceivingChainKey where
 -- | Used to encrypt and decrypt messages
 newtype MessageKey = MessageKey ByteString
   deriving Eq
+
+instance Show MessageKey where
+  show (MessageKey key) = C8.unpack $ Base64.encode key
 
 -- | The root ratchet derives the message key chains
 

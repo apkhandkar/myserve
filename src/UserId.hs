@@ -10,6 +10,7 @@ module UserId
   , OurUserId(..)
   , TheirUserId(..)
   , mkUserId
+  , unsafeMkUserId
   )
 where
 
@@ -74,6 +75,9 @@ mkUserId (Text.toLower -> userId) = do
   pure $ UserId userId
  where
   isValidChar c = Char.isLower c || Char.isDigit c  || c == '.' || c == '_'
+
+unsafeMkUserId :: Text -> UserId
+unsafeMkUserId = UserId
 
 instance ToHttpApiData UserId where
   toUrlPiece = userIdToText

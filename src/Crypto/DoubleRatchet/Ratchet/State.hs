@@ -10,6 +10,8 @@ module Crypto.DoubleRatchet.Ratchet.State
   , advanceReceivingChain
   , advanceReceivingRatchet
   , advanceSendingChain
+  , advanceSendingRatchet
+  , initializeRatchetState
   )
 where
 
@@ -18,23 +20,17 @@ import Control.Lens.Operators ((.=), (+=))
 import Crypto.DoubleRatchet.Ratchet qualified as Ratchet
 import Crypto.DoubleRatchet.Curve25519 qualified as Curve25519
 import Lens.Micro.TH (makeLenses)
-import Lens.Micro ((^.), (.~), (%~), (&))
 import Data.List (unsnoc)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import UserId (OurUserId, TheirUserId)
-import Control.Monad.State (State, MonadState (get, put), gets, modify, runState)
-
--- CK0 yields MK0, CK1 yields MK1 and so on.
--- We store only the "next message" sequence number in the chain state.
--- Hence, upon a send/receive, we:
---   (i) nextMessage = n
---   (ii) advance chain to n, get CKn and MKn
---   (ii) set nextMessage = (n+1)
+import Control.Monad.State (State)
+import Control.Monad (when)
 
 data SendingChainState = SendingChainState
   { _sendingChainKey :: Ratchet.SendingChainKey
   , _nextSendingMessageIndex :: Int
+  , _previousSendingChainLength :: Int
   }
 
 makeLenses ''SendingChainState 
@@ -55,6 +51,30 @@ data RatchetState = RatchetState
   }
 
 makeLenses ''RatchetState
+
+initializeRatchetState
+  :: Curve25519.PublicKey
+  -> Ratchet.SendingChainKey
+  -> Ratchet.ReceivingChainKey
+  -> Ratchet.RootKey
+  -> RatchetState
+initializeRatchetState receivingChainEpoch' sendingChainKey' receivingChainKey' rootKey' =
+  RatchetState
+    { _root = rootKey'
+    , _sendingChainState =
+        SendingChainState
+          { _sendingChainKey = sendingChainKey'
+          , _nextSendingMessageIndex = 0
+          , _previousSendingChainLength = 0
+          }
+    , _receivingChainState =
+        ReceivingChainState
+          { _receivingChainEpoch = receivingChainEpoch'
+          , _receivingChainKey = receivingChainKey'
+          , _nextReceivingMessageIndex = 0
+          , _missedMessageMap = Map.empty
+          }
+    }
 
 type MessageKeyAndIndex = (Ratchet.MessageKey, Int)
 
@@ -78,9 +98,7 @@ singleAdvanceReceivingChain = zoom receivingChainState $ do
   pure (messageKey, chainIndex)
 
 advanceReceivingChain
-  :: RatchetState
-  -- ^ Initial ratchet state
-  -> Curve25519.PublicKey
+  :: Curve25519.PublicKey
   -- ^ DH public key
   -> Int
   -- ^ Previous chain length
@@ -88,94 +106,100 @@ advanceReceivingChain
   -> OurUserId
   -> TheirUserId
   -> Int
-  -> (Maybe MessageKeyAndIndex, RatchetState) 
-advanceReceivingChain ratchetState dhPubKey previousChainLength secretKey ourUserId theirUserId messageIndex =
-  let newRatchetState =
-        if dhPubKey == (ratchetState ^. receivingChainState ^. receivingChainEpoch)
-          -- we do not need to advance the ratchet
-          then ratchetState
-          else
-            advanceReceivingRatchet
-              ratchetState
-              dhPubKey
-              previousChainLength
-              secretKey
-              ourUserId
-              theirUserId
-      nextReceivingIndex = newRatchetState ^. receivingChainState ^. nextReceivingMessageIndex
-  in  if messageIndex == nextReceivingIndex then
-        -- simple advance
-        justMessageKey $ runState singleAdvanceReceivingChain newRatchetState
-      else if messageIndex > nextReceivingIndex then
-        -- advance multiple steps in the chain and cache any missed message keys
-        let (missedMessageKeys, newReceivingChainKey) =
+  -> State RatchetState (Maybe MessageKeyAndIndex)
+advanceReceivingChain dhPubKey previousChainLength secretKey ourUserId theirUserId messageIndex = do
+  -- Advance the root ratchet if we see a new receiving chain epoch
+  currentReceivingChainEpoch <- use (receivingChainState . receivingChainEpoch)
+  when (dhPubKey /= currentReceivingChainEpoch) $
+    advanceReceivingRatchet dhPubKey previousChainLength secretKey ourUserId theirUserId
+  nextReceivingIndex <- use (receivingChainState . nextReceivingMessageIndex)
+  if messageIndex == nextReceivingIndex
+    then fmap Just singleAdvanceReceivingChain
+  else if messageIndex > nextReceivingIndex
+    then do
+      zoom receivingChainState $ do
+        chainKey <- use receivingChainKey
+        oldMissedMessageMap <- use missedMessageMap
+        latestReceivingChainEpoch <- use receivingChainEpoch
+        let (skippedMessageKeys, newChainKey) =
               advanceFromTo
                 nextReceivingIndex
-                messageIndex 
-                (newRatchetState ^. receivingChainState ^. receivingChainKey)
-            newMissedMessageMap =
-              let oldMap = newRatchetState ^. receivingChainState ^. missedMessageMap
-                  newEntries =
-                    fmap
-                      ( \(mk, idx) ->
-                            ((newRatchetState ^. receivingChainState ^. receivingChainEpoch, idx), mk)
+                messageIndex
+                chainKey
+            newMissedMessageMapEntries =
+              fmap
+                (\(missedMessageKey, index) -> ((latestReceivingChainEpoch, index), missedMessageKey))
+                skippedMessageKeys
+            newMissedMessageMap = Map.union oldMissedMessageMap (Map.fromList newMissedMessageMapEntries)
+        missedMessageMap .= newMissedMessageMap
+        receivingChainKey .= newChainKey
+        nextReceivingMessageIndex .= messageIndex
+      fmap Just singleAdvanceReceivingChain
+  else zoom receivingChainState $ do 
+    missedMessageMap' <- use missedMessageMap
+    latestReceivingChainEpoch <- use receivingChainEpoch
+    let messageKeyMaybe =
+          Map.lookup (latestReceivingChainEpoch, messageIndex) missedMessageMap'
+    pure $ fmap (, messageIndex) messageKeyMaybe 
 
-                      )
-                      missedMessageKeys
-              in Map.union oldMap (Map.fromList newEntries)
-            newRatchetState' =
-              newRatchetState   
-                & receivingChainState . missedMessageMap .~ newMissedMessageMap
-                & receivingChainState . receivingChainKey .~ newReceivingChainKey
-                & receivingChainState . nextReceivingMessageIndex .~ messageIndex
-        in justMessageKey $ runState singleAdvanceReceivingChain newRatchetState'
-      else
-        -- hit missed messages cache
-        let missedMap = newRatchetState ^. receivingChainState ^. missedMessageMap
-            keyMaybe =
-              Map.lookup (newRatchetState ^. receivingChainState ^. receivingChainEpoch, messageIndex) missedMap
-        in (fmap (, messageIndex) keyMaybe, newRatchetState) 
- where justMessageKey tup = (Just $ fst tup, snd tup)
-
-advanceReceivingRatchet
-  :: RatchetState
-  -- ^ Initial ratchet state
+advanceSendingRatchet
+  :: Curve25519.SecretKey
+  -- ^ *Our* new secret key
   -> Curve25519.PublicKey
-  -- ^ DH public key
-  -> Int
-  -- ^ Previous chain length
-  -> Curve25519.SecretKey
+  -- ^ *Their* existing public key
   -> OurUserId
   -> TheirUserId
-  -> RatchetState
-advanceReceivingRatchet ratchetState dhPubKey previousChainLength secretKey ourUserId theirUserId =
-  -- Since we are advancing the root ratchet, we discard the chain key
-  let (advancedPreviousReceivingChain, _) =
-        advanceFromTo
-          (ratchetState ^. receivingChainState ^. nextReceivingMessageIndex)
-          previousChainLength
-          (ratchetState ^. receivingChainState ^. receivingChainKey)
-      newMissedMessageMap =
-        let oldMap = ratchetState ^. receivingChainState ^. missedMessageMap
-            newEntries =
-              fmap
-                ( \(mk, idx) ->
-                      ((ratchetState ^. receivingChainState ^. receivingChainEpoch, idx), mk)
-                )
-                advancedPreviousReceivingChain
-        in Map.union oldMap (Map.fromList newEntries)
-      newDhSecret = Curve25519.deriveDhSecret dhPubKey secretKey
-      (newRoot, newReceivingChainKey) =
-        Ratchet.advanceReceivingRatchet
-          (ratchetState ^. root)
+  -> State RatchetState ()
+advanceSendingRatchet secretKey dhPubKey ourUserId theirUserId = do
+  oldRoot <- use root
+  previousSendingChainLength' <- use (sendingChainState . nextSendingMessageIndex)
+  let newDhSecret = Curve25519.deriveDhSecret dhPubKey secretKey
+      (newRoot, newSendingChainKey) =
+        Ratchet.advanceSendingRatchet
+          oldRoot
           ourUserId
           theirUserId
           newDhSecret
-  in  ratchetState
-        & receivingChainState . missedMessageMap .~ newMissedMessageMap
-        & receivingChainState . receivingChainKey .~ newReceivingChainKey
-        & receivingChainState . nextReceivingMessageIndex .~ 0
-        & root .~ newRoot
+  zoom sendingChainState $ do
+    nextSendingMessageIndex .= 0
+    sendingChainKey .= newSendingChainKey
+    previousSendingChainLength .= previousSendingChainLength' 
+  root .= newRoot
+
+advanceReceivingRatchet
+  :: Curve25519.PublicKey
+  -- ^ DH public key
+  -> Int
+  -- ^ Previous chain length
+  -> Curve25519.SecretKey
+  -> OurUserId
+  -> TheirUserId
+  -> State RatchetState ()
+advanceReceivingRatchet dhPubKey previousChainLength secretKey ourUserId theirUserId = do
+  zoom receivingChainState $ do
+    chainIndex <- use nextReceivingMessageIndex
+    chainKey <- use receivingChainKey
+    oldMissedMessageMap <- use missedMessageMap
+    oldReceivingChainEpoch <- use receivingChainEpoch
+    -- Since we are advancing the root ratchet, we discard the chain key
+    let (skippedMessageKeys, _) = advanceFromTo chainIndex previousChainLength chainKey
+        newMissedMessageMapEntries =
+          fmap
+            (\(missedMessageKey, index) -> ((oldReceivingChainEpoch, index), missedMessageKey))
+            skippedMessageKeys
+        newMissedMessageMap = Map.union oldMissedMessageMap (Map.fromList newMissedMessageMapEntries)
+    missedMessageMap .= newMissedMessageMap
+    nextReceivingMessageIndex .= 0
+  oldRoot <- use root
+  let newDhSecret = Curve25519.deriveDhSecret dhPubKey secretKey
+      (newRoot, newReceivingChainKey) =
+        Ratchet.advanceReceivingRatchet
+          oldRoot
+          ourUserId
+          theirUserId
+          newDhSecret
+  root .= newRoot
+  receivingChainState . receivingChainKey .= newReceivingChainKey
 
 advanceFromTo :: Ratchet.ChainKey a => Int -> Int -> a -> ([MessageKeyAndIndex], a)
 advanceFromTo from to chainKey =
