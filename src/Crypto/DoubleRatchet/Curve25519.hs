@@ -1,5 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 
 module Crypto.DoubleRatchet.Curve25519
   ( Curve25519.DhSecret
@@ -17,7 +19,7 @@ import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Char8 qualified as Char8
 
 newtype PublicKey = PublicKey {unwrapPublicKey :: Curve25519.PublicKey}
-  deriving Eq
+  deriving newtype Eq
 
 instance Show PublicKey where
   show = Char8.unpack . encodePublicKey
