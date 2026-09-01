@@ -10,6 +10,7 @@ import Crypto.DoubleRatchet.Ratchet (initializeRootRatchet)
 import Crypto.DoubleRatchet.Ratchet.State (initializeRatchetState, advanceSendingChain, advanceReceivingChain, advanceSendingRatchet, sendingChainState, previousSendingChainLength, root)
 import Control.Monad.State (runState, execState)
 import Data.Maybe (catMaybes)
+import Control.Monad (forM)
 
 alice :: UserId
 alice = unsafeMkUserId "alice"
@@ -38,21 +39,22 @@ demo = do
       bobRs0 = initializeRatchetState alicePub0 bobSendingCk0 bobReceivingCk0 bobRoot0
   -- Generate a few message keys
   putStrLn "Generating 3 [alice] sending keys from root..."
-  let (aliceSMk0, aliceRs1) = runState advanceSendingChain aliceRs0
-      (aliceSMk1, aliceRs2) = runState advanceSendingChain aliceRs1
-      (aliceSMk2, aliceRs3) = runState advanceSendingChain aliceRs2
+  let (aliceKeys0, aliceRs3) =
+        flipRunState aliceRs0 $ do
+          mk0 <- advanceSendingChain
+          mk1 <- advanceSendingChain
+          mk2 <- advanceSendingChain
+          pure [mk0, mk1, mk2]
   putStrLn "Generating 3 [bob] receiving keys from root..."
-  let (bobRMk0, bobRs1) =
-        runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk0) bobRs0
-      (bobRMk1, bobRs2) =
-        runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk1) bobRs1
-      (bobRMk2, bobRs3) =
-        runState (advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov $ snd aliceSMk2) bobRs2
-  if [aliceSMk0, aliceSMk1, aliceSMk2] == catMaybes [bobRMk0, bobRMk1, bobRMk2]
+  let (bobKeys0, bobRs3) =
+        flipRunState bobRs0 $ do
+          forM aliceKeys0 $ \aliceKey ->
+            advanceReceivingChain alicePub0 0 bobSec0 bobBobPov aliceBobPov (snd aliceKey)
+  if aliceKeys0 == catMaybes bobKeys0
     then putStrLn "[  OK  ] Chain advance"
     else do
-      putStrLn $ "Alice message keys: " <> show [aliceSMk0, aliceSMk1, aliceSMk2]
-      putStrLn $ "Bob message keys: " <> show [bobRMk0, bobRMk1, bobRMk2]
+      putStrLn $ "Alice message keys: " <> show aliceKeys0
+      putStrLn $ "Bob message keys: " <> show bobKeys0
       error "[FAILED] Chain advance"
   putStrLn "Generating 3 more [alice] sending keys from root..."
   let (aliceSMk3, aliceRs4) = runState advanceSendingChain aliceRs3
@@ -95,3 +97,4 @@ demo = do
       putStrLn $ "Alice message keys: " <> show [aliceSMk6, aliceSMk7, aliceSMk8]
       putStrLn $ "Bob message keys: " <> show [bobRMk8, bobRMk7, bobRMk6]
       error "[FAILED] Cross-epoch out-of-order chain advance"
+ where flipRunState = flip runState

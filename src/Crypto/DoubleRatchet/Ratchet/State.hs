@@ -23,7 +23,7 @@ module Crypto.DoubleRatchet.Ratchet.State
   )
 where
 
-import Control.Lens.Combinators (zoom, use)
+import Control.Lens.Combinators (zoom, use, At (at))
 import Control.Lens.Operators ((.=), (+=))
 import Crypto.DoubleRatchet.Ratchet qualified as Ratchet
 import Crypto.DoubleRatchet.Curve25519 qualified as Curve25519
@@ -51,6 +51,16 @@ data ReceivingChainState = ReceivingChainState
   }
 
 makeLenses ''ReceivingChainState 
+
+data RatchetState' root = RatchetState'
+  { _root' :: root
+  , _sendingChainState' :: SendingChainState'
+  , _receivingChainState' :: ReceivingChainState'
+  }
+
+data SendingChainState'
+
+data ReceivingChainState'
 
 data RatchetState = RatchetState
   { _root :: Ratchet.RootKey
@@ -145,10 +155,11 @@ advanceReceivingChain dhPubKey previousChainLength secretKey ourUserId theirUser
         nextReceivingMessageIndex .= messageIndex
       fmap Just singleAdvanceReceivingChain
   else zoom receivingChainState $ do 
-    skippedMessageMap' <- use skippedMessageMap
     latestReceivingChainEpoch <- use receivingChainEpoch
+    skippedMessageMap' <- use skippedMessageMap
     let messageKeyMaybe =
           Map.lookup (latestReceivingChainEpoch, messageIndex) skippedMessageMap'
+    skippedMessageMap . at (latestReceivingChainEpoch, messageIndex) .= Nothing
     pure $ fmap (, messageIndex) messageKeyMaybe 
 
 advanceSendingRatchet
