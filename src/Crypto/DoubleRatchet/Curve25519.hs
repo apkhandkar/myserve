@@ -9,6 +9,7 @@ module Crypto.DoubleRatchet.Curve25519
   , PublicKey(..)
   , deriveDhSecret
   , generateKeyPair
+  , toPublicKey
   )
 where
 
@@ -34,6 +35,9 @@ generateKeyPair :: IO (Curve25519.SecretKey, PublicKey)
 generateKeyPair = do
   secretKey <- Curve25519.generateSecretKey
   pure $ (secretKey, PublicKey $ Curve25519.toPublic secretKey)
+
+toPublicKey :: Curve25519.SecretKey -> PublicKey
+toPublicKey = PublicKey . Curve25519.toPublic
 
 deriveDhSecret :: PublicKey -> Curve25519.SecretKey -> Curve25519.DhSecret
 deriveDhSecret publicKey secretKey = Curve25519.dh (unwrapPublicKey publicKey) secretKey

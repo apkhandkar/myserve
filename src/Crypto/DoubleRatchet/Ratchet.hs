@@ -9,6 +9,7 @@
 
 module Crypto.DoubleRatchet.Ratchet
   ( ChainKey(..)
+  , ChainKey'(..)
   , MessageKey
   , ReceivingChainKey
   , RootKey
@@ -21,6 +22,10 @@ module Crypto.DoubleRatchet.Ratchet
   , mkV1RatchetContext
   , mkReceivingChainKeyContextData
   , mkSendingChainKeyContextData
+  , advanceMessageKeyChain'
+  , initializeRootRatchet'
+  , deriveNextRootKeyReceiving
+  , deriveNextRootKeySending
   )
 where
 
@@ -82,6 +87,9 @@ class ChainKey a where
   toBytes :: a -> ByteString
   fromBytes :: ByteString -> a
 
+newtype ChainKey' = ChainKey' ByteString
+  deriving newtype (Eq, ByteArray.ByteArrayAccess)
+
 newtype SendingChainKey = SendingChainKey ByteString
   deriving newtype (Eq, ByteArray.ByteArrayAccess)
 
@@ -119,6 +127,21 @@ initializeRootRatchet ourUserId theirUserId dhSecret =
       , ReceivingChainKey $ HKDF.expand keyBytes receivingChainContext 32
       )
 
+
+-- | Initialize the root ratchet
+initializeRootRatchet'
+  :: OurUserId -> TheirUserId -> Curve25519.DhSecret -> (RootKey, ChainKey', ChainKey')
+initializeRootRatchet' ourUserId theirUserId dhSecret =
+  let keyBytes = HKDF.extract @SHA256 (ByteArray.empty @ByteString) dhSecret
+      sendingChainContext =
+        mkV1RatchetContext $ mkSendingChainKeyContextData ourUserId theirUserId
+      receivingChainContext =
+        mkV1RatchetContext $ mkReceivingChainKeyContextData ourUserId theirUserId
+  in  ( RootKey $ HKDF.expand keyBytes (mkV1RatchetContext RootKeyContext) 32
+      , ChainKey' $ HKDF.expand keyBytes sendingChainContext 32
+      , ChainKey' $ HKDF.expand keyBytes receivingChainContext 32
+      )
+
 advanceSendingRatchet :: RootKey -> OurUserId -> TheirUserId -> Curve25519.DhSecret -> (RootKey, SendingChainKey)
 advanceSendingRatchet rootKey ourUserId theirUserId dhSecret =
   let keyBytes = HKDF.extract @SHA256 rootKey dhSecret
@@ -128,6 +151,15 @@ advanceSendingRatchet rootKey ourUserId theirUserId dhSecret =
       , SendingChainKey $ HKDF.expand keyBytes sendingChainContext 32
       )
 
+deriveNextRootKeySending :: RootKey -> OurUserId -> TheirUserId -> Curve25519.DhSecret -> (RootKey, ChainKey')
+deriveNextRootKeySending rootKey ourUserId theirUserId dhSecret =
+  let keyBytes = HKDF.extract @SHA256 rootKey dhSecret
+      sendingChainContext =
+        mkV1RatchetContext $ mkSendingChainKeyContextData ourUserId theirUserId
+  in  ( RootKey $ HKDF.expand keyBytes (mkV1RatchetContext RootKeyContext) 32
+      , ChainKey' $ HKDF.expand keyBytes sendingChainContext 32
+      )
+
 advanceReceivingRatchet :: RootKey -> OurUserId -> TheirUserId -> Curve25519.DhSecret -> (RootKey, ReceivingChainKey)
 advanceReceivingRatchet rootKey ourUserId theirUserId dhSecret =
   let keyBytes = HKDF.extract @SHA256 rootKey dhSecret
@@ -135,6 +167,15 @@ advanceReceivingRatchet rootKey ourUserId theirUserId dhSecret =
         mkV1RatchetContext $ mkReceivingChainKeyContextData ourUserId theirUserId
   in  ( RootKey $ HKDF.expand keyBytes (mkV1RatchetContext RootKeyContext) 32
       , ReceivingChainKey $ HKDF.expand keyBytes receivingChainContext 32
+      )
+
+deriveNextRootKeyReceiving :: RootKey -> OurUserId -> TheirUserId -> Curve25519.DhSecret -> (RootKey, ChainKey')
+deriveNextRootKeyReceiving rootKey ourUserId theirUserId dhSecret =
+  let keyBytes = HKDF.extract @SHA256 rootKey dhSecret
+      receivingChainContext =
+        mkV1RatchetContext $ mkReceivingChainKeyContextData ourUserId theirUserId
+  in  ( RootKey $ HKDF.expand keyBytes (mkV1RatchetContext RootKeyContext) 32
+      , ChainKey' $ HKDF.expand keyBytes receivingChainContext 32
       )
 
 -- | Advance the message key chain
@@ -147,5 +188,18 @@ advanceMessageKeyChain chainKey =
   , fromBytes 
       $ ByteArray.convert
       $ HMAC.hmac @_ @_ @SHA256 (toBytes chainKey)
+      $ mkV1RatchetContext NextChainKeyContext
+  )
+
+-- | Advance the message key chain
+advanceMessageKeyChain' :: ChainKey' -> (MessageKey, ChainKey')
+advanceMessageKeyChain' chainKey =
+  ( MessageKey
+      $ ByteArray.convert
+      $ HMAC.hmac @_ @_ @SHA256 chainKey
+      $ mkV1RatchetContext MessageKeyContext
+  , ChainKey' 
+      $ ByteArray.convert
+      $ HMAC.hmac @_ @_ @SHA256 chainKey
       $ mkV1RatchetContext NextChainKeyContext
   )

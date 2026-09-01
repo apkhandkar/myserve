@@ -1,7 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
-module Crypto.DoubleRatchet.Ratchet.Demo (demo) where
+module Crypto.DoubleRatchet.Ratchet.Demo (demo, genDemo) where
 
 import UserId (UserId, unsafeMkUserId, OurUserId (OurUserId), TheirUserId (TheirUserId))
 import Lens.Micro ((^.))
@@ -10,7 +11,9 @@ import Crypto.DoubleRatchet.Ratchet (initializeRootRatchet)
 import Crypto.DoubleRatchet.Ratchet.State (initializeRatchetState, advanceSendingChain, advanceReceivingChain, advanceSendingRatchet, sendingChainState, previousSendingChainLength, root)
 import Control.Monad.State (runState, execState)
 import Data.Maybe (catMaybes)
-import Control.Monad (forM)
+import Control.Monad (forM, replicateM)
+import Crypto.DoubleRatchet.GenState qualified as DoubleRatchet
+import Crypto.GenImplementation (Speakeasy) 
 
 alice :: UserId
 alice = unsafeMkUserId "alice"
@@ -98,3 +101,21 @@ demo = do
       putStrLn $ "Bob message keys: " <> show [bobRMk8, bobRMk7, bobRMk6]
       error "[FAILED] Cross-epoch out-of-order chain advance"
  where flipRunState = flip runState
+
+genDemo :: IO ()
+genDemo = do
+  -- Generate initial key pair
+  (aliceSec0, alicePub0) <- generateKeyPair 
+  (bobSec0, bobPub0) <- generateKeyPair
+  -- Initialize ratchets
+  let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
+      bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  let (aliceSk, _aliceDr1) =
+        flipRunRatchet aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  let g = fmap fst aliceSk
+  let (bobSk, _bobDr1) =
+        flipRunRatchet bobDr0 $ do
+          forM g $ \sg -> DoubleRatchet.advanceReceivingChain sg 0 bobBobPov aliceBobPov
+  putStrLn $ "Alice's keys: " <> show (fmap snd aliceSk)
+  putStrLn $ "Bob's keys: " <> show bobSk
+ where flipRunRatchet = flip $ DoubleRatchet.runRatchetM @Speakeasy
