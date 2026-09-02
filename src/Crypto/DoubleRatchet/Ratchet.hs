@@ -4,7 +4,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -18,13 +17,14 @@ module Crypto.DoubleRatchet.Ratchet
   , advanceReceivingChain
   , advanceSendingChain
   , advanceSendingRatchet
+  , getCurrentSendingChainIndex
   , initializeDoubleRatchet
   , runRatchetM
   )
 where
 
 import Data.List (unsnoc)
-import Control.Lens (makeLenses, zoom, use, (.=), use, At (at), (+=), (%=))
+import Control.Lens (makeLenses, zoom, use, (.=), use, At (at), (+=), (%=), (^.))
 import Data.Map.Strict qualified as Map
 import Control.Monad.State (State, runState)
 import Data.Set qualified as Set
@@ -125,27 +125,24 @@ initializeDoubleRatchet dhPublicKey' dhSecretKey' ourUserId theirUserId =
   let derivedSecret = deriveSharedSecret @impl dhPublicKey' dhSecretKey'
       (rootKey', sendingChainKey', receivingChainKey') =
         initializeRootRatchet @impl ourUserId theirUserId derivedSecret
-  in  initializeRatchetState dhPublicKey' sendingChainKey' receivingChainKey' rootKey'
- where
-  initializeRatchetState receivingChainEpoch' sendingChainKey' receivingChainKey' rootKey' =
-    RatchetState
-      { _root = rootKey'
-      , _dhSecretKey = dhSecretKey'
-      , _sendingChainState =
-          SendingChainState
-            { _sendingChainKey = sendingChainKey'
-            , _nextSendingMessageIndex = 0
-            , _previousSendingChainLength = 0
-            }
-      , _receivingChainState =
-          ReceivingChainState
-            { _receivingChainEpoch = receivingChainEpoch'
-            , _knownReceivingChainEpochs = Set.singleton dhPublicKey'
-            , _receivingChainKey = receivingChainKey'
-            , _nextReceivingMessageIndex = 0
-            , _skippedMessageMap = Map.empty
-            }
-      }
+  in  RatchetState
+        { _root = rootKey'
+        , _dhSecretKey = dhSecretKey'
+        , _sendingChainState =
+            SendingChainState
+              { _sendingChainKey = sendingChainKey'
+              , _nextSendingMessageIndex = 0
+              , _previousSendingChainLength = 0
+              }
+        , _receivingChainState =
+            ReceivingChainState
+              { _receivingChainEpoch = dhPublicKey'
+              , _knownReceivingChainEpochs = Set.singleton dhPublicKey'
+              , _receivingChainKey = receivingChainKey'
+              , _nextReceivingMessageIndex = 0
+              , _skippedMessageMap = Map.empty
+              }
+        }
 
 type RatchetM impl = State (RatchetState impl)
 
@@ -341,13 +338,13 @@ advanceFromTo from to chainKey = do
       go ck num =
         let (mk, nCk) = deriveNextChainKey @impl ck
         in (mk, nCk):(go nCk (num - 1))
-  if from == to
-    then ([], chainKey) -- no need to advance
-  else if from > to
-    then ([], chainKey) -- we got ahead with processing
-  else
-    -- do the advance
-    let newKeys = go chainKey (to - from)
-    in  case (fmap snd $ unsnoc newKeys) of
-          Nothing -> ([], chainKey)
-          Just (_, finalChainKey) -> (zip (fmap fst newKeys) [from ..], finalChainKey)
+  if from < to
+    then
+      let newKeys = go chainKey (to - from)
+      in  case (fmap snd $ unsnoc newKeys) of
+            Nothing -> ([], chainKey)
+            Just (_, finalChainKey) -> (zip (fmap fst newKeys) [from ..], finalChainKey)
+    else ([], chainKey) -- we're caught up or are already ahead
+
+getCurrentSendingChainIndex :: RatchetState impl -> Int
+getCurrentSendingChainIndex ratchetState = ratchetState ^. sendingChainState . nextSendingMessageIndex
