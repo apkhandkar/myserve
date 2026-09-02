@@ -1,14 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE GeneralisedNewtypeDeriving #-}
-{-# LANGUAGE RecordWildCards #-}
 
 module Crypto.DoubleRatchet.HMAC
-  ( advanceMessageKeyChain
+  ( deriveNextChainKey
   )
 where
 
@@ -19,8 +13,8 @@ import Crypto.MAC.HMAC qualified as HMAC
 import Crypto.DoubleRatchet.Key qualified as Key
 
 -- | Advance the message key chain
-advanceMessageKeyChain :: Key.ChainKey -> (Key.MessageKey, Key.ChainKey)
-advanceMessageKeyChain chainKey =
+deriveNextChainKey :: Key.ChainKey -> (Key.MessageKey, Key.ChainKey)
+deriveNextChainKey chainKey =
   ( Key.MessageKey
       $ ByteArray.convert
       $ HMAC.hmac @_ @_ @SHA256 chainKey

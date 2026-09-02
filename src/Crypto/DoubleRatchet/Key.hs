@@ -3,9 +3,9 @@
 {-# LANGUAGE DerivingStrategies #-}
 
 module Crypto.DoubleRatchet.Key
-  ( RootKey(..)
-  , ChainKey(..)
+  ( ChainKey(..)
   , MessageKey(..)
+  , RootKey(..)
   )
 where
 

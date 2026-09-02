@@ -9,8 +9,8 @@ module Crypto.DoubleRatchet.Context
     , NextChainKeyContext
     , RootKeyContext
     )
-  , mkSendingChainKeyContextData
   , mkReceivingChainKeyContextData
+  , mkSendingChainKeyContextData
   , mkV1RatchetContext
   )
 where

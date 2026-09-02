@@ -2,9 +2,9 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Crypto.DoubleRatchet.HKDF
-  ( initializeRootRatchet
+  ( deriveNextRootKeyReceiving
   , deriveNextRootKeySending
-  , deriveNextRootKeyReceiving
+  , initializeRootRatchet
   ) where
 
 import Crypto.DoubleRatchet.Context qualified as Context

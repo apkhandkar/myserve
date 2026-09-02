@@ -1,19 +1,18 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Crypto.DoubleRatchet.Speakeasy (Speakeasy) where
+module Crypto.DoubleRatchet.Implementation (Speakeasy) where
 
-import Crypto.DoubleRatchet.Ratchet qualified as DoubleRatchet
+import Crypto.DoubleRatchet.Ratchet qualified as Ratchet
 import Crypto.DoubleRatchet.HMAC qualified as HMAC
 import Crypto.DoubleRatchet.HKDF qualified as HKDF
 import Crypto.DoubleRatchet.Key qualified as Speakeasy
 import Crypto.DoubleRatchet.Curve25519 qualified as Curve25519
 import UserId (OurUserId, TheirUserId)
 
--- | Our implementation of a double ratchet
 data Speakeasy
 
-instance DoubleRatchet.DoubleRatchetImplementation Speakeasy where
+instance Ratchet.DoubleRatchet Speakeasy where
   type RootKey Speakeasy = Speakeasy.RootKey
   type ChainKey Speakeasy = Speakeasy.ChainKey
   type MessageKey Speakeasy = Speakeasy.MessageKey
@@ -24,7 +23,7 @@ instance DoubleRatchet.DoubleRatchetImplementation Speakeasy where
   type TheirId Speakeasy = TheirUserId
   toPublicKey = Curve25519.toPublicKey
   deriveSharedSecret = Curve25519.deriveDhSecret
-  deriveNextChainKey = HMAC.advanceMessageKeyChain
+  deriveNextChainKey = HMAC.deriveNextChainKey
   initializeRootRatchet = HKDF.initializeRootRatchet
   deriveNextRootKeySending = HKDF.deriveNextRootKeySending
   deriveNextRootKeyReceiving = HKDF.deriveNextRootKeyReceiving
