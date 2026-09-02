@@ -52,16 +52,6 @@ data ReceivingChainState = ReceivingChainState
 
 makeLenses ''ReceivingChainState 
 
-data RatchetState' root = RatchetState'
-  { _root' :: root
-  , _sendingChainState' :: SendingChainState'
-  , _receivingChainState' :: ReceivingChainState'
-  }
-
-data SendingChainState'
-
-data ReceivingChainState'
-
 data RatchetState = RatchetState
   { _root :: Ratchet.RootKey
   , _sendingChainState :: SendingChainState

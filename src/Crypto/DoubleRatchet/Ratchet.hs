@@ -106,7 +106,7 @@ instance ChainKey ReceivingChainKey where
 
 -- | Used to encrypt and decrypt messages
 newtype MessageKey = MessageKey ByteString
-  deriving Eq
+  deriving (Eq, Ord)
 
 instance Show MessageKey where
   show (MessageKey key) = C8.unpack $ Base64.encode key

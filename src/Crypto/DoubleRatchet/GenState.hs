@@ -24,10 +24,10 @@ module Crypto.DoubleRatchet.GenState
 where
 
 import Data.List (unsnoc)
-import Control.Lens (makeLenses, zoom, use, (.=), use, At (at), (+=))
+import Control.Lens (makeLenses, zoom, use, (.=), use, At (at), (+=), (%=))
 import Data.Map.Strict qualified as Map
 import Control.Monad.State (State, runState)
-import Control.Monad (when)
+import Data.Set qualified as Set
 
 -- | Typeclass for implementations of the double ratchet state machine defined in this module.
 class DoubleRatchetImplementation impl where
@@ -92,6 +92,7 @@ makeLenses ''SendingChainState
 data ReceivingChainState impl = ReceivingChainState
   { _receivingChainKey :: ChainKey impl
   , _receivingChainEpoch :: PublicKey impl
+  , _knownReceivingChainEpochs :: Set.Set (PublicKey impl)
   , _nextReceivingMessageIndex :: Int
   , _skippedMessageMap :: Map.Map (PublicKey impl, Int) (MessageKey impl)
   }
@@ -139,6 +140,7 @@ initializeDoubleRatchet dhPublicKey' dhSecretKey' ourUserId theirUserId =
       , _receivingChainState =
           ReceivingChainState
             { _receivingChainEpoch = receivingChainEpoch'
+            , _knownReceivingChainEpochs = Set.singleton dhPublicKey'
             , _receivingChainKey = receivingChainKey'
             , _nextReceivingMessageIndex = 0
             , _skippedMessageMap = Map.empty
@@ -153,7 +155,7 @@ runRatchetM = flip runState
 data MessageKeyId dhPublicKey = MessageKeyId
   { keyIndex :: Int
   , chainEpoch :: dhPublicKey
-  }
+  } deriving (Eq, Ord, Show)
 
 advanceSendingChain
   :: forall impl. DoubleRatchetImplementation impl
@@ -197,41 +199,69 @@ advanceReceivingChain
   -> TheirId impl
   -> RatchetM impl (Maybe (MessageKey impl))
 advanceReceivingChain messageKeyId previousChainLength ourUserId theirUserId = do
-  -- Advance the root ratchet if we see a new receiving chain epoch
+
   currentReceivingChainEpoch <- use (receivingChainState . receivingChainEpoch)
-  when (chainEpoch messageKeyId /= currentReceivingChainEpoch) $
-    advanceReceivingRatchet (chainEpoch messageKeyId) previousChainLength ourUserId theirUserId
-  nextReceivingIndex <- use (receivingChainState . nextReceivingMessageIndex)
-  if (keyIndex messageKeyId) == nextReceivingIndex
-    then fmap Just singleAdvanceReceivingChain
-  else if (keyIndex messageKeyId) > nextReceivingIndex
+  knownReceivingChainEpochs' <- use (receivingChainState . knownReceivingChainEpochs)
+
+  -- Requesting a key in the same chain epoch as our receiving chain state
+  if chainEpoch messageKeyId == currentReceivingChainEpoch
+    then currentEpochLookup
+
+  -- Requesting a key in an older chain epoch
+  else if chainEpoch messageKeyId `Set.member` knownReceivingChainEpochs'
     then do
-      zoom receivingChainState $ do
-        chainKey <- use receivingChainKey
-        oldMissedMessageMap <- use skippedMessageMap
-        latestReceivingChainEpoch <- use receivingChainEpoch
-        let (skippedMessageKeys, newChainKey) =
-              advanceFromTo @impl
-                nextReceivingIndex
-                (keyIndex messageKeyId) 
-                chainKey
-        let newSkippedMessageMapEntries =
-              Map.fromList $
-                fmap
-                  (\(missedMessageKey, index) -> ((latestReceivingChainEpoch, index), missedMessageKey))
-                  skippedMessageKeys
-            newSkippedMessageMap = Map.union oldMissedMessageMap newSkippedMessageMapEntries
-        skippedMessageMap .= newSkippedMessageMap
-        receivingChainKey .= newChainKey
-        nextReceivingMessageIndex .= (keyIndex messageKeyId) 
-      fmap Just singleAdvanceReceivingChain
-  else zoom receivingChainState $ do 
-    latestReceivingChainEpoch <- use receivingChainEpoch
-    skippedMessageMap' <- use skippedMessageMap
-    let messageKeyMaybe =
-          Map.lookup (latestReceivingChainEpoch, (keyIndex messageKeyId)) skippedMessageMap'
-    skippedMessageMap . at (latestReceivingChainEpoch, (keyIndex messageKeyId)) .= Nothing
-    pure messageKeyMaybe
+      -- Since it's an older epoch, we go straight to the skipped message cache
+      skippedMessageMap' <- use (receivingChainState . skippedMessageMap)
+      let messageKeyMaybe =
+            Map.lookup (chainEpoch messageKeyId, keyIndex messageKeyId) skippedMessageMap'
+      receivingChainState . skippedMessageMap . at (chainEpoch messageKeyId, (keyIndex messageKeyId)) .= Nothing
+      -- If we can't find a message key, it must have already been consumed... or we got a bogus message key ID
+      -- Either way, we don't care
+      pure messageKeyMaybe
+
+  -- Requesting a key in a new epoch
+  else do
+    -- Update the set of known epochs
+    receivingChainState . knownReceivingChainEpochs %= Set.insert (chainEpoch messageKeyId)
+    -- Advance ratchet and get a new sending chain key
+    advanceReceivingRatchet (chainEpoch messageKeyId) previousChainLength ourUserId theirUserId
+    -- Now that we are in the correct epoch, we can do a current-epoch lookup
+    currentEpochLookup
+
+ where
+  currentEpochLookup :: RatchetM impl (Maybe (MessageKey impl))
+  currentEpochLookup = do
+    nextReceivingIndex <- use (receivingChainState . nextReceivingMessageIndex)
+    if (keyIndex messageKeyId) == nextReceivingIndex
+      then fmap Just singleAdvanceReceivingChain
+    else if (keyIndex messageKeyId) > nextReceivingIndex
+      then do
+        zoom receivingChainState $ do
+          chainKey <- use receivingChainKey
+          oldMissedMessageMap <- use skippedMessageMap
+          latestReceivingChainEpoch <- use receivingChainEpoch
+          let (skippedMessageKeys, newChainKey) =
+                advanceFromTo @impl
+                  nextReceivingIndex
+                  (keyIndex messageKeyId) 
+                  chainKey
+          let newSkippedMessageMapEntries =
+                Map.fromList $
+                  fmap
+                    (\(missedMessageKey, index) -> ((latestReceivingChainEpoch, index), missedMessageKey))
+                    skippedMessageKeys
+              newSkippedMessageMap = Map.union oldMissedMessageMap newSkippedMessageMapEntries
+          skippedMessageMap .= newSkippedMessageMap
+          receivingChainKey .= newChainKey
+          nextReceivingMessageIndex .= (keyIndex messageKeyId) 
+        fmap Just singleAdvanceReceivingChain
+    else zoom receivingChainState $ do 
+      latestReceivingChainEpoch <- use receivingChainEpoch
+      skippedMessageMap' <- use skippedMessageMap
+      let messageKeyMaybe =
+            Map.lookup (latestReceivingChainEpoch, (keyIndex messageKeyId)) skippedMessageMap'
+      skippedMessageMap . at (latestReceivingChainEpoch, (keyIndex messageKeyId)) .= Nothing
+      pure messageKeyMaybe
 
 advanceSendingRatchet
   :: forall impl. DoubleRatchetImplementation impl

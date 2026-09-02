@@ -1,6 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 
 module Crypto.DoubleRatchet.Ratchet.Demo where
@@ -15,8 +17,9 @@ import Data.Maybe (catMaybes)
 import Control.Monad (forM, replicateM)
 import Crypto.DoubleRatchet.GenState qualified as DoubleRatchet
 import Crypto.GenImplementation (Speakeasy)
-import Data.Tuple.Extra (snd3)
-import Test.Hspec (Spec, shouldBe, it)
+import Test.Hspec (Spec, shouldBe, it, describe)
+import Hedgehog.Gen (shuffle, sample)
+import Data.List (sort)
 
 alice :: UserId
 alice = unsafeMkUserId "alice"
@@ -120,10 +123,143 @@ initialize = do
   let (bobSk, _bobDr1) =
         DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
           forM aliceSk $ \(key, _, prevChainLen) ->
-            DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
   -- The keys should be identical
-  (fmap snd3 aliceSk) `shouldBe` (catMaybes bobSk)
+  (fmap (\(keyId, key, _) -> (keyId, key)) aliceSk) `shouldBe` (filterNotFound bobSk)
+
+
+outOfOrder :: IO () 
+outOfOrder = do
+  -- Generate initial key pair
+  (aliceSec0, alicePub0) <- generateKeyPair 
+  (bobSec0, bobPub0) <- generateKeyPair
+  -- Initialize ratchets
+  let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
+      bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  -- Derive Alice's first 5 sending keys
+  let (aliceSk, _aliceDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Shuffle Alice's message keys
+  shuffledAliceSk <- sample $ shuffle aliceSk
+  -- Derive Bob's first 5 receiving keys out-of-order
+  let (bobSk, _bobDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
+          forM shuffledAliceSk $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- The keys should be identical
+  (fmap (\(keyId, key, _) -> (keyId, key)) aliceSk) `shouldBe` (sort $ filterNotFound bobSk)
+
+postRatchetInOrder :: IO ()
+postRatchetInOrder = do
+  -- Generate initial key pair
+  (aliceSec0, alicePub0) <- generateKeyPair
+  (bobSec0, bobPub0) <- generateKeyPair
+  -- Initialize ratchets
+  let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
+      bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  -- Derive some sending keys
+  let (aliceKeys0 , aliceDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive some receiving keys
+  let (_, bobDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
+          forM aliceKeys0 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- Perform a root ratchet to get a new sending chain key
+  (aliceSec1, _) <- generateKeyPair
+  let _aliceDr1 =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr1 $
+          DoubleRatchet.advanceSendingRatchet aliceSec1 aliceAlicePov bobAlicePov
+  -- Derive some sending keys from the new chain
+  let (aliceKeys1, _aliceDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr1 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive some receiving keys
+  let (bobKeys1, _bobDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr1 $
+          forM aliceKeys1 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- The keys should be identical
+  (fmap (\(keyId, key, _) -> (keyId, key)) aliceKeys1) `shouldBe` (filterNotFound bobKeys1)
+
+postRatchetOutOfOrder :: IO ()
+postRatchetOutOfOrder = do
+  -- Generate initial key pair
+  (aliceSec0, alicePub0) <- generateKeyPair
+  (bobSec0, bobPub0) <- generateKeyPair
+  -- Initialize ratchets
+  let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
+      bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  -- Derive some sending keys
+  let (aliceKeys0 , aliceDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive some receiving keys
+  let (_, bobDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
+          forM aliceKeys0 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- Perform a root ratchet to get a new sending chain key
+  (aliceSec1, _) <- generateKeyPair
+  let (_, aliceDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr1 $
+          DoubleRatchet.advanceSendingRatchet aliceSec1 aliceAlicePov bobAlicePov
+  -- Derive some sending keys from the new chain
+  let (aliceKeys1, _aliceDr3) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr2 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive some receiving keys out of order
+  -- Shuffle Alice's message keys
+  shuffledAliceKeys1 <- sample $ shuffle aliceKeys1 
+  let (bobKeys1, _bobDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr1 $
+          forM shuffledAliceKeys1 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- The keys should be identical
+  (sort $ filterNotFound bobKeys1) `shouldBe` (fmap (\(keyId, key, _) -> (keyId, key)) aliceKeys1)
+
+crossEpochOutOfOrder :: IO ()
+crossEpochOutOfOrder = do
+  -- Generate initial key pair
+  (aliceSec0, alicePub0) <- generateKeyPair
+  (bobSec0, bobPub0) <- generateKeyPair
+  -- Initialize ratchets
+  let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
+      bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  -- Derive some sending keys
+  let (aliceKeys0 , aliceDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Perform a root ratchet to get a new sending chain key
+  (aliceSec1, _) <- generateKeyPair
+  let (_, aliceDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr1 $
+          DoubleRatchet.advanceSendingRatchet aliceSec1 aliceAlicePov bobAlicePov
+  -- Derive some sending keys from the new chain
+  let (aliceKeys1, _aliceDr3) =
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr2 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive some receiving keys out of order
+  -- Shuffle Alice's message keys
+  shuffledAliceKeys1 <- sample $ shuffle aliceKeys1 
+  let (bobKeys1, bobDr1) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
+          forM shuffledAliceKeys1 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- The keys from the new epoch should be identical
+  (sort $ filterNotFound bobKeys1) `shouldBe` (fmap (\(keyId, key, _) -> (keyId, key)) aliceKeys1)
+  -- Now derive receiving keys for the old epoch that were skipped, out-of-order
+  shuffledAliceKeys0 <- sample $ shuffle aliceKeys0
+  let (bobKeys0, _bobDr2) =
+        DoubleRatchet.runRatchetM @Speakeasy bobDr1 $
+          forM shuffledAliceKeys0 $ \(key, _, prevChainLen) ->
+            fmap (key,) $ DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  (sort $ filterNotFound bobKeys0) `shouldBe` (fmap (\(keyId, key, _) -> (keyId, key)) aliceKeys0)
+
+filterNotFound :: [(a, Maybe b)] -> [(a, b)]
+filterNotFound li = catMaybes $ fmap (\(a, b) -> case b of Nothing -> Nothing ; Just b' -> Just (a, b')) li
 
 genSpec :: Spec
 genSpec = do
-  it "Generates 5 sending/receiving keys after initialization" initialize
+  describe "Post-initialization" $ do
+    it "Generates matching receiving keys in order" initialize
+    it "Generates matching receiving keys out of order" outOfOrder 
+  describe "After a sending root key ratchet" $ do
+    it "Generates matching receiving keys in order" $ postRatchetInOrder
+    it "Generates matching receiving keys out of order" $ postRatchetOutOfOrder
+    it "Generates matching receiving keys across chain epochs out of order" $ crossEpochOutOfOrder

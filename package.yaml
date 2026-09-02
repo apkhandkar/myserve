@@ -45,6 +45,7 @@ dependencies:
 - serialise
 - lens
 - hspec
+- hedgehog
 
 ghc-options:
 - -Wall
