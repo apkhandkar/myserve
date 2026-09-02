@@ -1,8 +1,9 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-missing-export-lists #-}
 
-module Crypto.DoubleRatchet.Ratchet.Demo (demo, genDemo) where
+module Crypto.DoubleRatchet.Ratchet.Demo where
 
 import UserId (UserId, unsafeMkUserId, OurUserId (OurUserId), TheirUserId (TheirUserId))
 import Lens.Micro ((^.))
@@ -13,7 +14,9 @@ import Control.Monad.State (runState, execState)
 import Data.Maybe (catMaybes)
 import Control.Monad (forM, replicateM)
 import Crypto.DoubleRatchet.GenState qualified as DoubleRatchet
-import Crypto.GenImplementation (Speakeasy) 
+import Crypto.GenImplementation (Speakeasy)
+import Data.Tuple.Extra (snd3)
+import Test.Hspec (Spec, shouldBe, it)
 
 alice :: UserId
 alice = unsafeMkUserId "alice"
@@ -102,20 +105,25 @@ demo = do
       error "[FAILED] Cross-epoch out-of-order chain advance"
  where flipRunState = flip runState
 
-genDemo :: IO ()
-genDemo = do
+initialize :: IO () 
+initialize = do
   -- Generate initial key pair
   (aliceSec0, alicePub0) <- generateKeyPair 
   (bobSec0, bobPub0) <- generateKeyPair
   -- Initialize ratchets
   let aliceDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy bobPub0 aliceSec0 aliceAlicePov bobAlicePov
       bobDr0 = DoubleRatchet.initializeDoubleRatchet @Speakeasy alicePub0 bobSec0 bobBobPov aliceBobPov
+  -- Derive Alice's first 5 sending keys
   let (aliceSk, _aliceDr1) =
-        flipRunRatchet aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
-  let g = fmap fst aliceSk
+        DoubleRatchet.runRatchetM @Speakeasy aliceDr0 $ replicateM 5 $ DoubleRatchet.advanceSendingChain
+  -- Derive Bob's first 5 receiving keys
   let (bobSk, _bobDr1) =
-        flipRunRatchet bobDr0 $ do
-          forM g $ \sg -> DoubleRatchet.advanceReceivingChain sg 0 bobBobPov aliceBobPov
-  putStrLn $ "Alice's keys: " <> show (fmap snd aliceSk)
-  putStrLn $ "Bob's keys: " <> show bobSk
- where flipRunRatchet = flip $ DoubleRatchet.runRatchetM @Speakeasy
+        DoubleRatchet.runRatchetM @Speakeasy bobDr0 $
+          forM aliceSk $ \(key, _, prevChainLen) ->
+            DoubleRatchet.advanceReceivingChain key prevChainLen bobBobPov aliceBobPov
+  -- The keys should be identical
+  (fmap snd3 aliceSk) `shouldBe` (catMaybes bobSk)
+
+genSpec :: Spec
+genSpec = do
+  it "Generates 5 sending/receiving keys after initialization" initialize

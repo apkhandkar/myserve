@@ -9,14 +9,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Crypto.DoubleRatchet.GenState
-  ( DoubleRatchet(..)
-  , MessageKeyId(..)
+  ( MessageKeyId(..)
   , RatchetM
   , RatchetState(..)
   , ReceivingChainState(..)
   , SendingChainState(..)
   , advanceReceivingChain
-  , advanceReceivingRatchet
   , advanceSendingChain
   , advanceSendingRatchet
   , initializeDoubleRatchet
@@ -109,11 +107,6 @@ data RatchetState impl = RatchetState
 
 makeLenses ''RatchetState
 
-data DoubleRatchet impl =
-  DoubleRatchet
-    { ratchetState :: RatchetState impl
-    }
-
 -- | Initialize a double ratchet.
 initializeDoubleRatchet
   :: forall impl. DoubleRatchetImplementation impl
@@ -126,14 +119,12 @@ initializeDoubleRatchet
  -- ^ Our identity
   -> TheirId impl
  -- ^ Their identity
-  -> DoubleRatchet impl
+  -> RatchetState impl
 initializeDoubleRatchet dhPublicKey' dhSecretKey' ourUserId theirUserId =
   let derivedSecret = deriveSharedSecret @impl dhPublicKey' dhSecretKey'
       (rootKey', sendingChainKey', receivingChainKey') =
         initializeRootRatchet @impl ourUserId theirUserId derivedSecret
-  in DoubleRatchet
-      { ratchetState = initializeRatchetState dhPublicKey' sendingChainKey' receivingChainKey' rootKey'
-      }
+  in  initializeRatchetState dhPublicKey' sendingChainKey' receivingChainKey' rootKey'
  where
   initializeRatchetState receivingChainEpoch' sendingChainKey' receivingChainKey' rootKey' =
     RatchetState
@@ -156,13 +147,8 @@ initializeDoubleRatchet dhPublicKey' dhSecretKey' ourUserId theirUserId =
 
 type RatchetM impl = State (RatchetState impl)
 
-runRatchetM
-  :: RatchetM impl a
-  -> DoubleRatchet impl
-  -> (a, DoubleRatchet impl)
-runRatchetM action ratchet =
-  let (res, newState) = runState action (ratchetState ratchet)
-  in  (res, ratchet {ratchetState = newState})
+runRatchetM :: forall impl a. RatchetState impl -> RatchetM impl a -> (a, RatchetState impl)
+runRatchetM = flip runState
 
 data MessageKeyId dhPublicKey = MessageKeyId
   { keyIndex :: Int
@@ -171,9 +157,9 @@ data MessageKeyId dhPublicKey = MessageKeyId
 
 advanceSendingChain
   :: forall impl. DoubleRatchetImplementation impl
-  => RatchetM impl (MessageKeyId (PublicKey impl), (MessageKey impl))
+  => RatchetM impl (MessageKeyId (PublicKey impl), (MessageKey impl), Int)
 advanceSendingChain = do
-  (mk, ci) <- zoom sendingChainState $ do
+  (messageKey, keyIndex) <- zoom sendingChainState $ do
       chainKey <- use sendingChainKey
       chainIndex <- use nextSendingMessageIndex
       let (messageKey, nextChainKey) = deriveNextChainKey @impl chainKey
@@ -181,7 +167,15 @@ advanceSendingChain = do
       nextSendingMessageIndex += 1
       pure (messageKey, chainIndex)
   dhSecretKey' <- use dhSecretKey
-  pure (MessageKeyId ci (toPublicKey @impl dhSecretKey'), mk)
+  previousSendingChainLength' <- use (sendingChainState . previousSendingChainLength)
+  pure
+    ( MessageKeyId
+        { chainEpoch = toPublicKey @impl dhSecretKey'
+        , ..
+        }
+    , messageKey
+    , previousSendingChainLength'
+    )
 
 -- | Advance the receiving message chain by a single step
 singleAdvanceReceivingChain
